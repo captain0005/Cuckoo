@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cuckoo 电商图片翻译</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar" aria-label="主导航">
+        <a class="brand" href="/" aria-label="Cuckoo 首页">
+          <span class="brand-mark">C</span>
+          <span>
+            <strong>Cuckoo</strong>
+            <small>Image Translation</small>
+          </span>
+        </a>
+        <nav class="nav-actions" aria-label="辅助操作">
+          <a class="ghost-link" href="/health" target="_blank" rel="noreferrer">API 状态</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">跨境电商图片本地化</p>
+          <h1>商品图中文一键识别、翻译并生成英文版</h1>
+          <p class="hero-desc">
+            保持原图设计和分辨率，只替换图片里的中文说明，支持批量上传、在线预览和 ZIP 打包下载。
+          </p>
+          <div class="hero-badges" aria-label="核心能力">
+            <span>1-30 张批量上传</span>
+            <span>高清原图输出</span>
+            <span>OCR + 翻译 + 回写</span>
+          </div>
+        </div>
+        <div class="hero-card" aria-hidden="true">
+          <span class="orb orb-a"></span>
+          <span class="orb orb-b"></span>
+          <div class="preview-window">
+            <div class="preview-toolbar"><span></span><span></span><span></span></div>
+            <div class="preview-image">
+              <span class="text-block short"></span>
+              <span class="text-block"></span>
+              <span class="text-block long"></span>
+            </div>
+            <div class="preview-caption">TRANSLATED IMAGE READY</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <form id="uploadForm" class="panel upload-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Step 01</p>
+              <h2>上传商品图片</h2>
+            </div>
+            <span id="fileMeta" class="file-meta">尚未选择</span>
+          </div>
+
+          <div class="dropzone" id="dropzone">
+            <input id="files" name="files" type="file" accept="image/*" multiple aria-label="选择商品图片" />
+            <div class="drop-content">
+              <span class="upload-icon" aria-hidden="true">+</span>
+              <strong>拖拽图片到这里，或点击选择文件</strong>
+              <span>支持 JPG、PNG、WebP 等格式，单次最多 30 张</span>
+            </div>
+          </div>
+
+          <ul id="selectedFiles" class="selected-files" aria-live="polite"></ul>
+
+          <div class="controls">
+            <label>
+              源语言
+              <select id="sourceLanguage" name="source_language">
+                <option value="zh">中文</option>
+              </select>
+            </label>
+            <label>
+              目标语言
+              <select id="targetLanguage" name="target_language">
+                <option value="en">英文</option>
+                <option value="ja">日文</option>
+                <option value="ko">韩文</option>
+                <option value="fr">法文</option>
+                <option value="de">德文</option>
+              </select>
+            </label>
+            <button type="submit" id="submitButton">开始翻译</button>
+          </div>
+        </form>
+
+        <aside class="panel status-panel" aria-live="polite">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Step 02</p>
+              <h2 id="jobTitle">任务状态</h2>
+            </div>
+            <a id="downloadLink" class="download disabled" href="#" aria-disabled="true">下载结果</a>
+          </div>
+          <p id="statusText" class="status-text">上传图片后开始处理。</p>
+          <div class="progress" aria-label="处理进度">
+            <div id="progressBar"></div>
+          </div>
+          <ol class="steps" aria-label="处理步骤">
+            <li id="stepUpload" data-state="pending"><span></span>上传</li>
+            <li id="stepQueue" data-state="pending"><span></span>排队</li>
+            <li id="stepProcess" data-state="pending"><span></span>处理</li>
+            <li id="stepDone" data-state="pending"><span></span>完成</li>
+          </ol>
+        </aside>
+      </section>
+
+      <section class="results-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Step 03</p>
+            <h2>翻译结果</h2>
+          </div>
+          <span id="resultCount" class="file-meta">暂无结果</span>
+        </div>
+        <section id="results" class="results" aria-live="polite">
+          <article class="empty-state">
+            <strong>处理完成后结果会显示在这里</strong>
+            <span>可预览每张图片，也可以打包下载 ZIP 文件。</span>
+          </article>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
