@@ -121,16 +121,7 @@ class OpenAICompatibleTranslator:
             },
             json={
                 "model": self.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Translate ecommerce product image copy. Return only the translated text. "
-                            "Keep numbers, units, model names, and line breaks when possible."
-                        ),
-                    },
-                    {"role": "user", "content": text},
-                ],
+                "messages": [{"role": "user", "content": text}],
                 "translation_options": {
                     "source_lang": source,
                     "target_lang": target,

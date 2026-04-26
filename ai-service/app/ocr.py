@@ -87,9 +87,9 @@ class PaddleOcrImageRecognizer:
         return payloads
 
     def _regions_from_payload(self, payload: dict[str, Any]) -> list[TextRegion]:
-        texts = payload.get("rec_texts") or payload.get("texts") or []
-        scores = payload.get("rec_scores") or payload.get("scores") or []
-        raw_boxes = payload.get("rec_boxes") or payload.get("dt_polys") or payload.get("rec_polys") or []
+        texts = _first_present(payload, "rec_texts", "texts")
+        scores = _first_present(payload, "rec_scores", "scores")
+        raw_boxes = _first_present(payload, "rec_boxes", "dt_polys", "rec_polys")
 
         regions: list[TextRegion] = []
         for index, raw_text in enumerate(texts):
@@ -178,3 +178,17 @@ def build_ocr_recognizer() -> OcrRecognizer:
     if engine != "paddle":
         raise RuntimeError(f"unsupported OCR_ENGINE: {settings.ocr_engine}")
     return PaddleOcrImageRecognizer()
+
+
+def _first_present(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            if len(value) == 0:
+                continue
+        except TypeError:
+            pass
+        return value
+    return []
