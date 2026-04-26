@@ -84,6 +84,39 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(result.regions_replaced, 0)
             self.assertTrue(output_path.exists())
 
+    def test_tiny_middle_regions_are_skipped_after_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "input.png"
+            output_path = root / "output.png"
+            Image.new("RGB", (790, 1340), "white").save(input_path)
+
+            region = TextRegion(
+                text="\u7535\u573a\u5f3a\u5ea6",
+                confidence=0.99,
+                x=303,
+                y=622,
+                width=46,
+                height=21,
+                polygon=[(303, 622), (349, 622), (349, 643), (303, 643)],
+            )
+            pipeline = ImageTranslationPipeline(
+                recognizer=StaticOcrRecognizer([region]),
+                translator=StubTranslator(),
+            )
+
+            result = pipeline.process_image(
+                input_path=input_path,
+                output_path=output_path,
+                source_filename="input.png",
+            )
+
+            self.assertEqual(result.regions_detected, 1)
+            self.assertEqual(result.regions_replaced, 0)
+            self.assertEqual(result.entries, [])
+            self.assertTrue(any("small OCR text" in warning for warning in result.warnings))
+            self.assertTrue(output_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

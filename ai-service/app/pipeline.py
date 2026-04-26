@@ -73,21 +73,12 @@ class ImageTranslationPipeline:
         regions = self.recognizer.recognize(input_path)
         translatable = [region for region in regions if is_translatable_ocr_text(region.text)]
         replacements: list[TextReplacement] = []
-        entries: list[TranslationEntry] = []
 
         for region in translatable:
             translated_text = self.translator.translate(region.text, self.source_language, self.target_language)
             if not translated_text.strip():
                 continue
             replacements.append(TextReplacement(region=region, translated_text=translated_text))
-            entries.append(
-                TranslationEntry(
-                    source_text=region.text,
-                    translated_text=translated_text,
-                    confidence=region.confidence,
-                    box=region.box,
-                )
-            )
 
         warnings: list[str] = []
         if not replacements:
@@ -95,11 +86,27 @@ class ImageTranslationPipeline:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(input_path.read_bytes())
         else:
-            render_replacements(
+            candidate_count = len(replacements)
+            replacements = render_replacements(
                 source_path=input_path,
                 output_path=output_path,
                 replacements=replacements,
             )
+            skipped_count = candidate_count - len(replacements)
+            if skipped_count:
+                warnings.append(f"Skipped {skipped_count} small OCR text region(s) that would not fit cleanly.")
+            if not replacements:
+                warnings.append("Chinese OCR text was found, but no translated regions were large enough to replace.")
+
+        entries = [
+            TranslationEntry(
+                source_text=item.region.text,
+                translated_text=item.translated_text,
+                confidence=item.region.confidence,
+                box=item.region.box,
+            )
+            for item in replacements
+        ]
 
         return ImageTranslationResult(
             source_filename=source_filename,
