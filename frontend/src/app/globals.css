@@ -1,7 +1,6 @@
 :root {
   color-scheme: light;
   --bg: #eef4ff;
-  --bg-deep: #dfeaff;
   --surface: rgba(255, 255, 255, 0.9);
   --surface-solid: #ffffff;
   --ink: #111827;
@@ -437,10 +436,6 @@ p {
   padding: 0;
 }
 
-.selected-files:empty {
-  display: none;
-}
-
 .selected-files li {
   display: flex;
   justify-content: space-between;
@@ -502,8 +497,7 @@ select {
   overflow: hidden;
 }
 
-#progressBar {
-  width: 0%;
+.progress div {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--accent), #22c55e, #38bdf8);
