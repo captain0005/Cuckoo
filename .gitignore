@@ -5,3 +5,12 @@ __pycache__/
 .env
 data/
 *.log
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+backend/.env
+backend/data/
+ai-service/.env
+ai-service/data/
