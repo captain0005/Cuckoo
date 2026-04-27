@@ -1,0 +1,15 @@
+.git
+.run-logs
+data
+*.log
+.env
+frontend/node_modules
+frontend/.next
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo
+backend/data
+backend/.env
+ai-service/.env
+ai-service/data
+ai-service/.venv
+ai-service/__pycache__
