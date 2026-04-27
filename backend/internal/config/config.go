@@ -1,6 +1,8 @@
 package config
 
 import (
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,6 +23,7 @@ type Config struct {
 
 func Load() Config {
 	dataDir := env("DATA_DIR", "data")
+	databaseDriver, databaseDSN := databaseConfig(dataDir)
 	return Config{
 		ServerAddr:       env("SERVER_ADDR", "127.0.0.1:8080"),
 		AIServiceURL:     strings.TrimRight(env("AI_SERVICE_URL", "http://127.0.0.1:9000"), "/"),
@@ -28,8 +31,8 @@ func Load() Config {
 		MaxBatchSize:     envInt("MAX_BATCH_SIZE", 30),
 		MaxUploadBytes:   int64(envInt("MAX_UPLOAD_MB", 30)) * 1024 * 1024,
 		FrontendOrigin:   env("FRONTEND_ORIGIN", "http://127.0.0.1:3000"),
-		DatabaseDriver:   strings.ToLower(env("DATABASE_DRIVER", "sqlite")),
-		DatabaseDSN:      env("DATABASE_DSN", filepath.Join(dataDir, "cuckoo.db")),
+		DatabaseDriver:   databaseDriver,
+		DatabaseDSN:      databaseDSN,
 		AdminTokenSecret: env("ADMIN_TOKEN_SECRET", "cuckoo-local-admin-secret"),
 	}
 }
@@ -51,6 +54,54 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func databaseConfig(dataDir string) (string, string) {
+	driver := strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")))
+	dsn := strings.TrimSpace(os.Getenv("DATABASE_DSN"))
+	if dsn == "" {
+		dsn = supabasePostgresDSN()
+	}
+	if dsn == "" {
+		dsn = filepath.Join(dataDir, "cuckoo.db")
+	}
+	if driver == "" {
+		driver = inferDatabaseDriver(dsn)
+	}
+	return driver, dsn
+}
+
+func supabasePostgresDSN() string {
+	projectRef := strings.TrimSpace(os.Getenv("SUPABASE_PROJECT_REF"))
+	password := strings.TrimSpace(os.Getenv("SUPABASE_DB_PASSWORD"))
+	if projectRef == "" || password == "" {
+		return ""
+	}
+
+	user := env("SUPABASE_DB_USER", "postgres")
+	database := env("SUPABASE_DB_NAME", "postgres")
+	host := env("SUPABASE_DB_HOST", "db."+projectRef+".supabase.co")
+	port := env("SUPABASE_DB_PORT", "5432")
+	sslMode := env("SUPABASE_DB_SSLMODE", "require")
+
+	connectionURL := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Host:   net.JoinHostPort(host, port),
+		Path:   database,
+	}
+	query := connectionURL.Query()
+	query.Set("sslmode", sslMode)
+	connectionURL.RawQuery = query.Encode()
+	return connectionURL.String()
+}
+
+func inferDatabaseDriver(dsn string) string {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		return "postgres"
+	}
+	return "sqlite"
 }
 
 func envInt(key string, fallback int) int {
