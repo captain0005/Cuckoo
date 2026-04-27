@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/6602966029/cuckoo/backend/internal/config"
 	"github.com/6602966029/cuckoo/backend/internal/handlers"
@@ -34,12 +35,14 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 }
 
 func cors(origin string) gin.HandlerFunc {
+	allowedOrigins := parseAllowedOrigins(origin)
 	return func(c *gin.Context) {
-		allowedOrigin := origin
-		if allowedOrigin == "" {
-			allowedOrigin = "*"
+		requestOrigin := c.GetHeader("Origin")
+		allowedOrigin := allowedOriginForRequest(requestOrigin, allowedOrigins)
+		if allowedOrigin != "" {
+			c.Header("Access-Control-Allow-Origin", allowedOrigin)
 		}
-		c.Header("Access-Control-Allow-Origin", allowedOrigin)
+		c.Header("Vary", "Origin")
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == http.MethodOptions {
@@ -48,4 +51,34 @@ func cors(origin string) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func parseAllowedOrigins(origin string) []string {
+	parts := strings.Split(origin, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			origins = append(origins, trimmed)
+		}
+	}
+	if len(origins) == 0 {
+		return []string{"*"}
+	}
+	return origins
+}
+
+func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) string {
+	for _, allowedOrigin := range allowedOrigins {
+		if allowedOrigin == "*" {
+			return "*"
+		}
+		if requestOrigin != "" && strings.EqualFold(requestOrigin, allowedOrigin) {
+			return requestOrigin
+		}
+	}
+	if requestOrigin == "" && len(allowedOrigins) == 1 {
+		return allowedOrigins[0]
+	}
+	return ""
 }
