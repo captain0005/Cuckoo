@@ -15,6 +15,7 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	r.Use(cors(cfg.FrontendOrigin))
 
 	h := handlers.New(cfg, repo)
+	r.GET("/", h.Health)
 	r.GET("/health", h.Health)
 	r.POST("/api/jobs", h.CreateJob)
 	r.GET("/api/jobs/:jobID", h.GetJob)
