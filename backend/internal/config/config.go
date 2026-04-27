@@ -25,12 +25,12 @@ func Load() Config {
 	dataDir := env("DATA_DIR", "data")
 	databaseDriver, databaseDSN := databaseConfig(dataDir)
 	return Config{
-		ServerAddr:       env("SERVER_ADDR", "127.0.0.1:8080"),
+		ServerAddr:       serverAddr(),
 		AIServiceURL:     strings.TrimRight(env("AI_SERVICE_URL", "http://127.0.0.1:9000"), "/"),
 		DataDir:          dataDir,
 		MaxBatchSize:     envInt("MAX_BATCH_SIZE", 30),
 		MaxUploadBytes:   int64(envInt("MAX_UPLOAD_MB", 30)) * 1024 * 1024,
-		FrontendOrigin:   env("FRONTEND_ORIGIN", "http://127.0.0.1:3000"),
+		FrontendOrigin:   env("FRONTEND_ORIGINS", env("FRONTEND_ORIGIN", "http://127.0.0.1:3000")),
 		DatabaseDriver:   databaseDriver,
 		DatabaseDSN:      databaseDSN,
 		AdminTokenSecret: env("ADMIN_TOKEN_SECRET", "cuckoo-local-admin-secret"),
@@ -54,6 +54,16 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func serverAddr() string {
+	if value := strings.TrimSpace(os.Getenv("SERVER_ADDR")); value != "" {
+		return value
+	}
+	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
+		return "0.0.0.0:" + port
+	}
+	return "127.0.0.1:8080"
 }
 
 func databaseConfig(dataDir string) (string, string) {
