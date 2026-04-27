@@ -1,0 +1,9 @@
+.git
+.railway
+data
+*.db
+*.log
+.env
+tmp
+dist
+node_modules
