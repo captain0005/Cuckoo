@@ -12,6 +12,17 @@ const (
 	StatusFailed     = "failed"
 )
 
+const (
+	RoleSuperAdmin = "super_admin"
+	RoleAdmin      = "admin"
+	RoleUser       = "user"
+)
+
+const (
+	UserStatusActive   = "active"
+	UserStatusDisabled = "disabled"
+)
+
 type Job struct {
 	ID             string `gorm:"primaryKey"`
 	Status         string `gorm:"index"`
@@ -25,6 +36,36 @@ type Job struct {
 	Results        []JobResult `gorm:"foreignKey:JobID;constraint:OnDelete:CASCADE"`
 }
 
+type User struct {
+	ID           string `gorm:"primaryKey"`
+	Username     string `gorm:"uniqueIndex;not null"`
+	DisplayName  string
+	Email        string `gorm:"uniqueIndex"`
+	Role         string `gorm:"index;not null"`
+	Status       string `gorm:"index;not null"`
+	PasswordHash string `gorm:"not null"`
+	LastLoginAt  *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	APIKeys      []APIKeyRecord `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE"`
+}
+
+type APIKeyRecord struct {
+	ID              string `gorm:"primaryKey"`
+	UserID          string `gorm:"index;not null"`
+	Provider        string `gorm:"index;not null"`
+	KeyName         string
+	MaskedKey       string
+	KeyFingerprint  string `gorm:"index"`
+	Status          string `gorm:"index;not null"`
+	TotalRequests   int
+	TotalCharacters int
+	LastUsedAt      *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	User            User `gorm:"foreignKey:UserID"`
+}
+
 type JobResult struct {
 	ID              uint `gorm:"primaryKey"`
 	JobID           string
@@ -35,6 +76,34 @@ type JobResult struct {
 	EntriesJSON     string `gorm:"type:text"`
 	WarningsJSON    string `gorm:"type:text"`
 	CreatedAt       time.Time
+}
+
+type UserResponse struct {
+	ID          string     `json:"id"`
+	Username    string     `json:"username"`
+	DisplayName string     `json:"display_name"`
+	Email       string     `json:"email"`
+	Role        string     `json:"role"`
+	Status      string     `json:"status"`
+	LastLoginAt *time.Time `json:"last_login_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type APIKeyRecordResponse struct {
+	ID              string     `json:"id"`
+	UserID          string     `json:"user_id"`
+	Username        string     `json:"username"`
+	Provider        string     `json:"provider"`
+	KeyName         string     `json:"key_name"`
+	MaskedKey       string     `json:"masked_key"`
+	KeyFingerprint  string     `json:"key_fingerprint"`
+	Status          string     `json:"status"`
+	TotalRequests   int        `json:"total_requests"`
+	TotalCharacters int        `json:"total_characters"`
+	LastUsedAt      *time.Time `json:"last_used_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type TranslationEntry struct {
@@ -52,6 +121,38 @@ type JobResultResponse struct {
 	RegionsReplaced int                `json:"regions_replaced"`
 	Entries         []TranslationEntry `json:"entries"`
 	Warnings        []string           `json:"warnings"`
+}
+
+func (u User) ToResponse() UserResponse {
+	return UserResponse{
+		ID:          u.ID,
+		Username:    u.Username,
+		DisplayName: u.DisplayName,
+		Email:       u.Email,
+		Role:        u.Role,
+		Status:      u.Status,
+		LastLoginAt: u.LastLoginAt,
+		CreatedAt:   u.CreatedAt,
+		UpdatedAt:   u.UpdatedAt,
+	}
+}
+
+func (r APIKeyRecord) ToResponse() APIKeyRecordResponse {
+	return APIKeyRecordResponse{
+		ID:              r.ID,
+		UserID:          r.UserID,
+		Username:        r.User.Username,
+		Provider:        r.Provider,
+		KeyName:         r.KeyName,
+		MaskedKey:       r.MaskedKey,
+		KeyFingerprint:  r.KeyFingerprint,
+		Status:          r.Status,
+		TotalRequests:   r.TotalRequests,
+		TotalCharacters: r.TotalCharacters,
+		LastUsedAt:      r.LastUsedAt,
+		CreatedAt:       r.CreatedAt,
+		UpdatedAt:       r.UpdatedAt,
+	}
 }
 
 func (r JobResult) ToResponse(fileURL string) JobResultResponse {

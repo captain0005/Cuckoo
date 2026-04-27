@@ -18,6 +18,17 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	r.POST("/api/jobs", h.CreateJob)
 	r.GET("/api/jobs/:jobID", h.GetJob)
 	r.GET("/api/jobs/:jobID/download", h.DownloadJob)
+	r.POST("/api/jobs/:jobID/export-folder", h.ExportJobToFolder)
+
+	r.POST("/api/admin/login", h.AdminLogin)
+	admin := r.Group("/api/admin")
+	admin.Use(h.RequireAdmin())
+	admin.GET("/users", h.ListAdminUsers)
+	admin.POST("/users", h.CreateAdminUser)
+	admin.PUT("/users/:userID", h.UpdateAdminUser)
+	admin.DELETE("/users/:userID", h.DeleteAdminUser)
+	admin.GET("/api-keys", h.ListAdminAPIKeys)
+
 	r.Static("/files", cfg.DataDir+"/outputs")
 	return r
 }
@@ -29,7 +40,7 @@ func cors(origin string) gin.HandlerFunc {
 			allowedOrigin = "*"
 		}
 		c.Header("Access-Control-Allow-Origin", allowedOrigin)
-		c.Header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

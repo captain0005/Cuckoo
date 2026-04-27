@@ -24,6 +24,7 @@ class TextLayout:
     lines: list[str]
     align: str
     line_spacing: float
+    role: str
 
 
 FONT_CANDIDATES = [
@@ -71,16 +72,17 @@ def _plan_text_layouts(image: Image.Image, replacements: list[TextReplacement]) 
                 lines=lines,
                 align=_alignment_for_role(role),
                 line_spacing=_line_spacing_for_role(role),
+                role=role,
             )
         )
-    return layouts
+    return _resolve_text_collisions(layouts, image.size)
 
 
 def _draw_text_block(draw: ImageDraw.ImageDraw, layout: TextLayout) -> None:
     x, y, width, height = layout.box
     line_height = _line_height(layout.font, layout.line_spacing)
     total_height = line_height * len(layout.lines)
-    cursor_y = y + max(0, (height - total_height) // 2)
+    cursor_y = y if _uses_top_alignment(layout.role) else y + max(0, (height - total_height) // 2)
     for line in layout.lines:
         text_width = _text_width(line, layout.font)
         if layout.align == "left":
@@ -91,6 +93,209 @@ def _draw_text_block(draw: ImageDraw.ImageDraw, layout: TextLayout) -> None:
             cursor_x = x + max(0, (width - text_width) // 2)
         draw.text((cursor_x, cursor_y), line, font=layout.font, fill=layout.color)
         cursor_y += line_height
+
+
+def _uses_top_alignment(role: str) -> bool:
+    return role in {"title", "subtitle"}
+
+
+def _text_content_bounds(layout: TextLayout) -> tuple[int, int, int, int]:
+    x, y, width, height = layout.box
+    content_height = _line_height(layout.font, layout.line_spacing) * len(layout.lines)
+    content_y = y if _uses_top_alignment(layout.role) else y + max(0, (height - content_height) // 2)
+    content_width = max((_text_width(line, layout.font) for line in layout.lines), default=0)
+    content_width = min(width, content_width)
+    if layout.align == "right":
+        content_x = x + max(0, width - content_width)
+    elif layout.align == "center":
+        content_x = x + max(0, (width - content_width) // 2)
+    else:
+        content_x = x
+    return content_x, content_y, content_width, content_height
+
+
+def _resolve_text_collisions(layouts: list[TextLayout], image_size: tuple[int, int]) -> list[TextLayout]:
+    if not layouts:
+        return layouts
+
+    gap = max(3, int(image_size[1] * 0.006))
+    occupied: list[tuple[int, int, int, int]] = []
+    kept_ids: set[int] = set()
+
+    for layout in sorted(layouts, key=_layout_priority_key):
+        if _place_layout_without_collision(layout, occupied, image_size, gap):
+            occupied.append(_padded_rect(_text_content_bounds(layout), gap, image_size))
+            kept_ids.add(id(layout))
+
+    return [layout for layout in layouts if id(layout) in kept_ids]
+
+
+def _layout_priority_key(layout: TextLayout) -> tuple[int, int, int]:
+    role_rank = {"title": 0, "subtitle": 1, "body": 2, "label": 3}
+    return (
+        role_rank.get(layout.role, 9),
+        layout.replacement.region.y,
+        layout.replacement.region.x,
+    )
+
+
+def _place_layout_without_collision(
+    layout: TextLayout,
+    occupied: list[tuple[int, int, int, int]],
+    image_size: tuple[int, int],
+    gap: int,
+) -> bool:
+    original_box = layout.box
+    original_font = layout.font
+    original_lines = list(layout.lines)
+
+    for broad in (False, True):
+        for box in _candidate_layout_boxes(layout, original_box, image_size, broad=broad):
+            _apply_candidate_box(layout, box, image_size)
+            content_rect = _text_content_bounds(layout)
+            padded_rect = _padded_rect(content_rect, gap, image_size)
+            if _rect_inside_image(content_rect, image_size) and not any(
+                _rects_overlap(padded_rect, other) for other in occupied
+            ):
+                return True
+
+    layout.box = original_box
+    layout.font = original_font
+    layout.lines = original_lines
+    return False
+
+
+def _candidate_layout_boxes(
+    layout: TextLayout,
+    origin_box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    *,
+    broad: bool,
+) -> list[tuple[int, int, int, int]]:
+    image_width, image_height = image_size
+    margin_x = max(2, int(image_width * 0.01))
+    x, y, width, height = _clamp_box(origin_box, image_size, margin_x=margin_x)
+    band_top, band_bottom = _placement_band(layout.role, (x, y, width, height), image_size, broad=broad)
+    max_y = max(band_top, band_bottom - height)
+    y_step = max(4, min(36, int(max(height, layout.replacement.region.height) * 0.65)))
+    x_step = max(8, min(54, int(width * 0.18)))
+
+    if layout.role in {"title", "subtitle"}:
+        x_values = [x]
+        prefer_positive_y = True
+    else:
+        max_x = max(margin_x, image_width - margin_x - width)
+        x_values = _axis_candidates(x, x_step, margin_x, max_x, prefer_positive=True)
+        prefer_positive_y = layout.role != "label"
+
+    y_values = _axis_candidates(y, y_step, band_top, max_y, prefer_positive=prefer_positive_y)
+    boxes: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for candidate_y in y_values:
+        for candidate_x in x_values:
+            box = _clamp_box((candidate_x, candidate_y, width, height), image_size, margin_x=margin_x)
+            if box not in seen:
+                seen.add(box)
+                boxes.append(box)
+    return boxes
+
+
+def _placement_band(
+    role: str,
+    box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    *,
+    broad: bool,
+) -> tuple[int, int]:
+    _, image_height = image_size
+    _, y, _, height = box
+    margin_y = max(2, int(image_height * 0.006))
+
+    if broad:
+        if role in {"title", "subtitle"}:
+            return margin_y, max(int(image_height * 0.42), y + height)
+        if role == "label":
+            return max(margin_y, int(image_height * 0.68)), image_height - margin_y
+        return margin_y, image_height - margin_y
+
+    if role in {"title", "subtitle"}:
+        return margin_y, max(int(image_height * 0.36), y + height)
+    if role == "label":
+        top = max(margin_y, int(image_height * 0.70), y - max(height * 2, int(image_height * 0.05)))
+        return top, image_height - margin_y
+
+    span = max(height * 3, int(image_height * 0.08))
+    return max(margin_y, y - span), min(image_height - margin_y, y + height + span)
+
+
+def _axis_candidates(
+    base: int,
+    step: int,
+    minimum: int,
+    maximum: int,
+    *,
+    prefer_positive: bool,
+) -> list[int]:
+    base = max(minimum, min(maximum, base))
+    values = [base]
+    seen = {base}
+    max_delta = max(base - minimum, maximum - base)
+    directions = (1, -1) if prefer_positive else (-1, 1)
+    for delta in range(step, max_delta + step, step):
+        for direction in directions:
+            value = max(minimum, min(maximum, base + direction * delta))
+            if value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
+
+
+def _apply_candidate_box(layout: TextLayout, box: tuple[int, int, int, int], image_size: tuple[int, int]) -> None:
+    x, y, width, height = box
+    layout.font, layout.lines = _fit_text(layout.replacement.translated_text, width, height, role=layout.role)
+    content_height = _line_height(layout.font, layout.line_spacing) * len(layout.lines)
+    layout.box = _clamp_box((x, y, width, max(height, content_height)), image_size)
+
+
+def _clamp_box(
+    box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    *,
+    margin_x: int = 0,
+) -> tuple[int, int, int, int]:
+    image_width, image_height = image_size
+    x, y, width, height = box
+    width = max(1, min(width, max(1, image_width - margin_x * 2)))
+    height = max(1, min(height, image_height))
+    x = max(margin_x, min(max(margin_x, image_width - margin_x - width), x))
+    y = max(0, min(max(0, image_height - height), y))
+    return x, y, width, height
+
+
+def _padded_rect(
+    rect: tuple[int, int, int, int],
+    padding: int,
+    image_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    image_width, image_height = image_size
+    x, y, width, height = rect
+    x1 = max(0, x - padding)
+    y1 = max(0, y - padding)
+    x2 = min(image_width, x + width + padding)
+    y2 = min(image_height, y + height + padding)
+    return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
+
+
+def _rect_inside_image(rect: tuple[int, int, int, int], image_size: tuple[int, int]) -> bool:
+    image_width, image_height = image_size
+    x, y, width, height = rect
+    return x >= 0 and y >= 0 and x + width <= image_width and y + height <= image_height
+
+
+def _rects_overlap(rect_a: tuple[int, int, int, int], rect_b: tuple[int, int, int, int]) -> bool:
+    ax, ay, aw, ah = rect_a
+    bx, by, bw, bh = rect_b
+    return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
 
 
 def _inpaint_layouts(image: Image.Image, layouts: list[TextLayout]) -> Image.Image:
