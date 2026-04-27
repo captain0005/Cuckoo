@@ -13,6 +13,26 @@ const STATUS_LABELS: Record<string, string> = {
 
 const STEP_STATES = ["upload", "queue", "process", "done"] as const;
 type StepName = (typeof STEP_STATES)[number];
+type FilePermissionMode = "read" | "readwrite";
+type LocalWritableFileStream = {
+  write: (data: Blob | BufferSource | string) => Promise<void>;
+  close: () => Promise<void>;
+};
+type LocalFileHandle = {
+  createWritable: () => Promise<LocalWritableFileStream>;
+};
+type LocalDirectoryHandle = {
+  name: string;
+  queryPermission?: (descriptor?: { mode?: FilePermissionMode }) => Promise<PermissionState>;
+  requestPermission?: (descriptor?: { mode?: FilePermissionMode }) => Promise<PermissionState>;
+  getFileHandle: (name: string, options?: { create?: boolean }) => Promise<LocalFileHandle>;
+};
+
+declare global {
+  interface Window {
+    showDirectoryPicker?: (options?: { id?: string; mode?: FilePermissionMode }) => Promise<LocalDirectoryHandle>;
+  }
+}
 
 export default function Home() {
   const [files, setFiles] = useState<File[]>([]);
@@ -24,6 +44,11 @@ export default function Home() {
   const [targetLanguage, setTargetLanguage] = useState("en");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [exportDirectoryHandle, setExportDirectoryHandle] = useState<LocalDirectoryHandle | null>(null);
+  const [exportDirectoryName, setExportDirectoryName] = useState("");
+  const [overwriteExport, setOverwriteExport] = useState(false);
+  const [exportMessage, setExportMessage] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const totalSize = useMemo(() => files.reduce((sum, file) => sum + file.size, 0), [files]);
@@ -90,6 +115,71 @@ export default function Home() {
       setStatusText(error instanceof Error ? error.message : "任务创建失败。");
       setProgress(0);
       setIsSubmitting(false);
+    }
+  }
+
+  async function chooseExportFolder() {
+    if (!window.showDirectoryPicker) {
+      setExportMessage("当前浏览器不支持直接选择文件夹，请使用最新版 Chrome 或 Edge。");
+      return null;
+    }
+    try {
+      const handle = await window.showDirectoryPicker({
+        id: "cuckoo-export-folder",
+        mode: "readwrite",
+      });
+      setExportDirectoryHandle(handle);
+      setExportDirectoryName(handle.name);
+      setExportMessage(`已选择文件夹：${handle.name}`);
+      return handle;
+    } catch (error) {
+      if (isAbortError(error)) {
+        setExportMessage("已取消选择文件夹。");
+      } else {
+        setExportMessage(error instanceof Error ? error.message : "无法选择文件夹。");
+      }
+      return null;
+    }
+  }
+
+  async function handleFolderExport(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!job?.results?.length || job.status !== "completed") {
+      setExportMessage("任务完成后才能导出到文件夹。");
+      return;
+    }
+    const directoryHandle = exportDirectoryHandle || (await chooseExportFolder());
+    if (!directoryHandle) {
+      return;
+    }
+
+    setIsExporting(true);
+    setExportMessage("正在导出图片...");
+    try {
+      const granted = await ensureDirectoryPermission(directoryHandle);
+      if (!granted) {
+        setExportMessage("没有获得文件夹写入权限。");
+        return;
+      }
+      let exported = 0;
+      for (const item of job.results) {
+        const response = await fetch(apiURL(item.file_url), { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`无法读取生成图片：${item.output_filename || item.source_filename}`);
+        }
+        const blob = await response.blob();
+        const filename = await nextExportFilename(directoryHandle, item.output_filename || "translated.png", overwriteExport);
+        const fileHandle = await directoryHandle.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        exported += 1;
+      }
+      setExportMessage(`已导出 ${exported} 张图片到 ${directoryHandle.name}`);
+    } catch (error) {
+      setExportMessage(error instanceof Error ? error.message : "导出失败。");
+    } finally {
+      setIsExporting(false);
     }
   }
 
@@ -237,6 +327,26 @@ export default function Home() {
               </li>
             ))}
           </ol>
+          <form className="folder-export" onSubmit={handleFolderExport}>
+            <div className="folder-picker">
+              <button type="button" onClick={() => void chooseExportFolder()}>
+                选择文件夹
+              </button>
+              <span>{exportDirectoryName || "尚未选择导出文件夹"}</span>
+            </div>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={overwriteExport}
+                onChange={(event) => setOverwriteExport(event.target.checked)}
+              />
+              覆盖同名文件
+            </label>
+            <button type="submit" disabled={job?.status !== "completed" || isExporting}>
+              导出到文件夹
+            </button>
+            {exportMessage ? <p className="export-message">{exportMessage}</p> : null}
+          </form>
         </aside>
       </section>
 
@@ -380,4 +490,47 @@ function formatBytes(bytes: number) {
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   const value = bytes / 1024 ** index;
   return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+async function ensureDirectoryPermission(handle: LocalDirectoryHandle) {
+  const options = { mode: "readwrite" as const };
+  if (handle.queryPermission && (await handle.queryPermission(options)) === "granted") {
+    return true;
+  }
+  if (handle.requestPermission) {
+    return (await handle.requestPermission(options)) === "granted";
+  }
+  return true;
+}
+
+async function nextExportFilename(handle: LocalDirectoryHandle, filename: string, overwrite: boolean) {
+  if (overwrite || !(await fileExists(handle, filename))) {
+    return filename;
+  }
+  const dotIndex = filename.lastIndexOf(".");
+  const stem = dotIndex > 0 ? filename.slice(0, dotIndex) : filename;
+  const ext = dotIndex > 0 ? filename.slice(dotIndex) : "";
+  for (let index = 1; index < 10000; index += 1) {
+    const candidate = `${stem}_${index}${ext}`;
+    if (!(await fileExists(handle, candidate))) {
+      return candidate;
+    }
+  }
+  throw new Error("无法生成可用的导出文件名。");
+}
+
+async function fileExists(handle: LocalDirectoryHandle, filename: string) {
+  try {
+    await handle.getFileHandle(filename);
+    return true;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "NotFoundError") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }

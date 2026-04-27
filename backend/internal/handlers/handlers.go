@@ -49,6 +49,17 @@ type jobResponse struct {
 	Results        []models.JobResultResponse `json:"results"`
 }
 
+type exportFolderRequest struct {
+	Directory string `json:"directory"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+type exportFolderResponse struct {
+	Directory     string   `json:"directory"`
+	ExportedCount int      `json:"exported_count"`
+	Files         []string `json:"files"`
+}
+
 func New(cfg config.Config, repo *repository.Repository) *Handler {
 	return &Handler{
 		cfg:      cfg,
@@ -139,6 +150,46 @@ func (h *Handler) DownloadJob(c *gin.Context) {
 		return
 	}
 	c.FileAttachment(zipPath, "cuckoo-"+jobID+".zip")
+}
+
+func (h *Handler) ExportJobToFolder(c *gin.Context) {
+	jobID := c.Param("jobID")
+	job, err := h.repo.GetJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
+		return
+	}
+	if job.Status != models.StatusCompleted {
+		c.JSON(http.StatusConflict, gin.H{"detail": "job is not completed yet"})
+		return
+	}
+
+	var req exportFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid export payload"})
+		return
+	}
+	destination := strings.TrimSpace(req.Directory)
+	if destination == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "export directory is required"})
+		return
+	}
+	absoluteDestination, err := filepath.Abs(destination)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+
+	files, err := services.ExportFilesToDirectory(h.cfg.OutputDir(jobID), absoluteDestination, req.Overwrite)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, exportFolderResponse{
+		Directory:     absoluteDestination,
+		ExportedCount: len(files),
+		Files:         files,
+	})
 }
 
 func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.FileHeader) ([]uploadedImage, error) {

@@ -2,11 +2,31 @@ import unittest
 
 from PIL import Image
 
-from app.image_renderer import TextReplacement, _erase_box, _fit_text, _plan_text_layouts
+from app.image_renderer import TextReplacement, _erase_box, _fit_text, _plan_text_layouts, _text_content_bounds
 from app.ocr import TextRegion
 
 
 class ImageRendererTest(unittest.TestCase):
+    def assert_layouts_do_not_overlap(self, layouts):
+        bounds = [_text_content_bounds(layout) for layout in layouts]
+        for index, first in enumerate(bounds):
+            for second in bounds[index + 1 :]:
+                self.assertFalse(
+                    self._rects_overlap(first, second),
+                    f"Text bounds overlap: {first} and {second}",
+                )
+
+    @staticmethod
+    def _rects_overlap(first, second):
+        first_x, first_y, first_width, first_height = first
+        second_x, second_y, second_width, second_height = second
+        return (
+            first_x < second_x + second_width
+            and first_x + first_width > second_x
+            and first_y < second_y + second_height
+            and first_y + first_height > second_y
+        )
+
     def test_fit_text_prefers_smaller_font_over_splitting_word(self):
         _, lines = _fit_text("Three-in-one", 300, 120)
 
@@ -88,6 +108,81 @@ class ImageRendererTest(unittest.TestCase):
 
         self.assertLess(y, region.y)
         self.assertEqual(y + height, region.y + region.height)
+
+    def test_top_title_layouts_are_shifted_apart_when_english_wraps(self):
+        image = Image.new("RGB", (790, 1340), "white")
+        alarm_region = TextRegion(
+            text="\u8d85\u6807\u81ea\u52a8\u62a5\u8b66",
+            confidence=0.99,
+            x=28,
+            y=18,
+            width=360,
+            height=42,
+            polygon=[(28, 18), (388, 18), (388, 60), (28, 60)],
+        )
+        contact_region = TextRegion(
+            text="\u53ca\u65f6\u63d0\u9192\u907f\u514d\u63a5\u89e6",
+            confidence=0.99,
+            x=28,
+            y=44,
+            width=330,
+            height=42,
+            polygon=[(28, 44), (358, 44), (358, 86), (28, 86)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [
+                TextReplacement(
+                    region=alarm_region,
+                    translated_text="Automatic alarm when standards are exceeded",
+                ),
+                TextReplacement(
+                    region=contact_region,
+                    translated_text="Timely alerts to avoid contact",
+                ),
+            ],
+        )
+
+        self.assertEqual(len(layouts), 2)
+        first_bounds = _text_content_bounds(layouts[0])
+        second_bounds = _text_content_bounds(layouts[1])
+        first_bottom = first_bounds[1] + first_bounds[3]
+
+        self.assertGreaterEqual(second_bounds[1], first_bottom)
+        self.assert_layouts_do_not_overlap(layouts)
+
+    def test_body_layouts_are_repositioned_to_avoid_collisions(self):
+        image = Image.new("RGB", (640, 900), "white")
+        screen_region = TextRegion(
+            text="\u5c4f\u5e55\u62a5\u8b66",
+            confidence=0.99,
+            x=245,
+            y=360,
+            width=150,
+            height=28,
+            polygon=[(245, 360), (395, 360), (395, 388), (245, 388)],
+        )
+        audio_region = TextRegion(
+            text="\u58f0\u97f3\u62a5\u8b66",
+            confidence=0.99,
+            x=250,
+            y=374,
+            width=145,
+            height=28,
+            polygon=[(250, 374), (395, 374), (395, 402), (250, 402)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [
+                TextReplacement(region=screen_region, translated_text="Screen alarm status indicator"),
+                TextReplacement(region=audio_region, translated_text="Audio alert warning status"),
+            ],
+        )
+
+        self.assertEqual(len(layouts), 2)
+        self.assert_layouts_do_not_overlap(layouts)
 
 
 if __name__ == "__main__":
