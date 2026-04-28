@@ -13,3 +13,4 @@ ai-service/.env
 ai-service/data
 ai-service/.venv
 ai-service/__pycache__
+ai-service/tests
