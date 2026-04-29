@@ -31,7 +31,7 @@ COPY scripts/start-railway.sh /app/start-railway.sh
 
 ENV GIN_MODE=release
 ENV DATA_DIR=/app/data
-ENV PORT=8080
+ENV SERVER_ADDR=0.0.0.0:8080
 ENV AI_SERVICE_URL=http://127.0.0.1:9000
 ENV PYTHONPATH=/app/ai-service
 ENV TRANSLATOR_PROVIDER=openai
