@@ -57,24 +57,16 @@ func env(key, fallback string) string {
 }
 
 func serverAddr() string {
-	if isRailway() {
-		if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
-			return "0.0.0.0:" + port
-		}
-	}
 	if value := strings.TrimSpace(os.Getenv("SERVER_ADDR")); value != "" {
 		return value
+	}
+	if port := strings.TrimSpace(os.Getenv("BACKEND_PORT")); port != "" {
+		return "0.0.0.0:" + port
 	}
 	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
 		return "0.0.0.0:" + port
 	}
 	return "127.0.0.1:8080"
-}
-
-func isRailway() bool {
-	return strings.TrimSpace(os.Getenv("RAILWAY_SERVICE_ID")) != "" ||
-		strings.TrimSpace(os.Getenv("RAILWAY_PROJECT_ID")) != "" ||
-		strings.TrimSpace(os.Getenv("RAILWAY_ENVIRONMENT_ID")) != ""
 }
 
 func databaseConfig(dataDir string) (string, string) {
