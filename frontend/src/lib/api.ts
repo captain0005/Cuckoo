@@ -73,7 +73,14 @@ export type AdminUserPayload = {
   password?: string;
 };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
+const PRODUCTION_API_BASE_URL = "https://cuckoo-production.up.railway.app";
+const LOCAL_API_BASE_URL = "http://127.0.0.1:8080";
+const configuredAPIBaseURL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  (process.env.NODE_ENV === "production" ? PRODUCTION_API_BASE_URL : LOCAL_API_BASE_URL);
+const API_BASE_URL = configuredAPIBaseURL.includes("cuckoo-backend-production.up.railway.app")
+  ? PRODUCTION_API_BASE_URL
+  : configuredAPIBaseURL;
 
 export function apiURL(path: string) {
   if (path.startsWith("http")) {
