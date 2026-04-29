@@ -97,6 +97,12 @@ func supabasePostgresDSN() string {
 	port := env("SUPABASE_DB_PORT", "5432")
 	sslMode := env("SUPABASE_DB_SSLMODE", "require")
 
+	// Resolve host to IPv4 to avoid IPv6 connectivity issues in environments
+	// that do not support outbound IPv6 (e.g., Railway).
+	if resolved := resolveIPv4(host); resolved != "" {
+		host = resolved
+	}
+
 	connectionURL := url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(user, password),
@@ -107,6 +113,19 @@ func supabasePostgresDSN() string {
 	query.Set("sslmode", sslMode)
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
+}
+
+func resolveIPv4(host string) string {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return ""
+	}
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+	}
+	return ""
 }
 
 func inferDatabaseDriver(dsn string) string {
