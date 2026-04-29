@@ -57,11 +57,11 @@ func env(key, fallback string) string {
 }
 
 func serverAddr() string {
-	if value := strings.TrimSpace(os.Getenv("SERVER_ADDR")); value != "" {
-		return value
-	}
 	if port := strings.TrimSpace(os.Getenv("BACKEND_PORT")); port != "" {
 		return "0.0.0.0:" + port
+	}
+	if value := strings.TrimSpace(os.Getenv("SERVER_ADDR")); value != "" {
+		return value
 	}
 	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
 		return "0.0.0.0:" + port
