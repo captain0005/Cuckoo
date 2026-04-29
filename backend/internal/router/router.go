@@ -55,18 +55,30 @@ func cors(origin string) gin.HandlerFunc {
 }
 
 func parseAllowedOrigins(origin string) []string {
+	const productionFrontendOrigin = "https://cuckoo-black.vercel.app"
+
 	parts := strings.Split(origin, ",")
 	origins := make([]string, 0, len(parts))
 	for _, part := range parts {
 		trimmed := strings.TrimSpace(part)
 		if trimmed != "" {
-			origins = append(origins, trimmed)
+			origins = appendUniqueOrigin(origins, trimmed)
 		}
 	}
+	origins = appendUniqueOrigin(origins, productionFrontendOrigin)
 	if len(origins) == 0 {
 		return []string{"*"}
 	}
 	return origins
+}
+
+func appendUniqueOrigin(origins []string, origin string) []string {
+	for _, existing := range origins {
+		if strings.EqualFold(existing, origin) {
+			return origins
+		}
+	}
+	return append(origins, origin)
 }
 
 func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) string {
