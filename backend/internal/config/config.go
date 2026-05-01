@@ -18,6 +18,7 @@ type Config struct {
 	FrontendOrigin   string
 	DatabaseDriver   string
 	DatabaseDSN      string
+	DatabaseFallback bool
 	AdminTokenSecret string
 }
 
@@ -33,6 +34,7 @@ func Load() Config {
 		FrontendOrigin:   env("FRONTEND_ORIGINS", env("FRONTEND_ORIGIN", "http://127.0.0.1:3000")),
 		DatabaseDriver:   databaseDriver,
 		DatabaseDSN:      databaseDSN,
+		DatabaseFallback: envBool("DATABASE_FALLBACK_SQLITE", false),
 		AdminTokenSecret: env("ADMIN_TOKEN_SECRET", "cuckoo-local-admin-secret"),
 	}
 }
@@ -72,6 +74,9 @@ func serverAddr() string {
 func databaseConfig(dataDir string) (string, string) {
 	driver := strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")))
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_DSN"))
+	if shouldSkipSupabaseDirectConnection() {
+		return "sqlite", filepath.Join(dataDir, "cuckoo.db")
+	}
 	if dsn == "" {
 		dsn = supabasePostgresDSN()
 	}
@@ -111,6 +116,7 @@ func supabasePostgresDSN() string {
 	}
 	query := connectionURL.Query()
 	query.Set("sslmode", sslMode)
+	query.Set("connect_timeout", "10")
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
 }
@@ -126,6 +132,20 @@ func resolveIPv4(host string) string {
 		}
 	}
 	return ""
+}
+
+func shouldSkipSupabaseDirectConnection() bool {
+	if !envBool("DATABASE_FALLBACK_SQLITE", false) {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv("DATABASE_DSN")) != "" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv("SUPABASE_DB_HOST")) != "" {
+		return false
+	}
+	return strings.TrimSpace(os.Getenv("SUPABASE_PROJECT_REF")) != "" &&
+		strings.TrimSpace(os.Getenv("SUPABASE_DB_PASSWORD")) != ""
 }
 
 func inferDatabaseDriver(dsn string) string {
@@ -146,4 +166,19 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func envBool(key string, fallback bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if raw == "" {
+		return fallback
+	}
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }

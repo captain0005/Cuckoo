@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,17 +24,31 @@ type Repository struct {
 }
 
 func Open(cfg config.Config) (*Repository, error) {
+	repo, err := openDatabase(cfg.DatabaseDriver, cfg.DatabaseDSN)
+	if err == nil {
+		return repo, nil
+	}
+	if !cfg.DatabaseFallback || cfg.DatabaseDriver == "sqlite" || cfg.DatabaseDriver == "" {
+		return nil, err
+	}
+
+	fallbackDSN := filepath.Join(cfg.DataDir, "cuckoo.db")
+	log.Printf("database %s unavailable, falling back to sqlite at %s: %v", cfg.DatabaseDriver, fallbackDSN, err)
+	return openDatabase("sqlite", fallbackDSN)
+}
+
+func openDatabase(driver, dsn string) (*Repository, error) {
 	var dialector gorm.Dialector
-	switch cfg.DatabaseDriver {
+	switch driver {
 	case "postgres", "postgresql":
-		dialector = postgres.Open(cfg.DatabaseDSN)
+		dialector = postgres.Open(dsn)
 	case "sqlite", "":
-		if err := os.MkdirAll(filepath.Dir(cfg.DatabaseDSN), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
 			return nil, err
 		}
-		dialector = sqlite.Open(cfg.DatabaseDSN)
+		dialector = sqlite.Open(dsn)
 	default:
-		return nil, errors.New("unsupported DATABASE_DRIVER: " + cfg.DatabaseDriver)
+		return nil, errors.New("unsupported DATABASE_DRIVER: " + driver)
 	}
 
 	db, err := gorm.Open(dialector, &gorm.Config{})
