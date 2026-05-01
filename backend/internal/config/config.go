@@ -106,6 +106,12 @@ func supabasePostgresDSN() string {
 	// that do not support outbound IPv6 (e.g., Railway).
 	if resolved := resolveIPv4(host); resolved != "" {
 		host = resolved
+	} else if isSupabaseDirectHost(host, projectRef) {
+		if poolerHost := supabasePoolerHost(); poolerHost != "" {
+			host = poolerHost
+			port = env("SUPABASE_POOLER_PORT", port)
+			user = supabasePoolerUser(projectRef, user)
+		}
 	}
 
 	connectionURL := url.URL{
@@ -119,6 +125,24 @@ func supabasePostgresDSN() string {
 	query.Set("connect_timeout", "10")
 	connectionURL.RawQuery = query.Encode()
 	return connectionURL.String()
+}
+
+func isSupabaseDirectHost(host, projectRef string) bool {
+	return strings.EqualFold(strings.TrimSpace(host), "db."+projectRef+".supabase.co")
+}
+
+func supabasePoolerHost() string {
+	return env("SUPABASE_POOLER_HOST", os.Getenv("SUPABASE_DB_POOLER_HOST"))
+}
+
+func supabasePoolerUser(projectRef, currentUser string) string {
+	if explicit := strings.TrimSpace(os.Getenv("SUPABASE_POOLER_USER")); explicit != "" {
+		return explicit
+	}
+	if currentUser == "" || currentUser == "postgres" {
+		return "postgres." + projectRef
+	}
+	return currentUser
 }
 
 func resolveIPv4(host string) string {
@@ -139,6 +163,9 @@ func shouldSkipSupabaseDirectConnection() bool {
 		return false
 	}
 	if strings.TrimSpace(os.Getenv("DATABASE_DSN")) != "" {
+		return false
+	}
+	if supabasePoolerHost() != "" {
 		return false
 	}
 	if strings.TrimSpace(os.Getenv("SUPABASE_DB_HOST")) != "" {
