@@ -9,6 +9,13 @@ _CONTROL_CHAR_RE = re.compile(r"[\u0000-\u0008\u000B\u000C\u000E-\u001F]")
 _CJK_RE = re.compile(r"[\u3400-\u9FFF]")
 _PUNCT_SPACE_RE = re.compile(r"\s+([,.;:!?%)]|[\u3002\uff0c\uff1b\uff1a\uff01\uff1f\uff09])")
 
+_COMMON_OCR_REPLACEMENTS = {
+    "叁数": "参数",
+    "産品": "产品",
+    "萤幕": "屏幕",
+    "荧幕": "屏幕",
+}
+
 
 def normalize_ocr_text(value: str) -> str:
     """Normalize OCR text before filtering, translation, and display."""
@@ -25,6 +32,8 @@ def normalize_ocr_text(value: str) -> str:
             continue
         line = re.sub(r"(?<=[\u3400-\u9FFF])\s+(?=[\u3400-\u9FFF])", "", line)
         line = _PUNCT_SPACE_RE.sub(r"\1", line)
+        for source, target in _COMMON_OCR_REPLACEMENTS.items():
+            line = line.replace(source, target)
         lines.append(line)
     return "\n".join(lines).strip()
 

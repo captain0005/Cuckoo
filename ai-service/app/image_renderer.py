@@ -41,6 +41,8 @@ BOLD_FONT_CANDIDATES = [
     "/Library/Fonts/Arial Bold.ttf",
 ]
 
+BOLD_ROLES = {"title", "section_title", "table_key", "label"}
+
 
 def render_replacements(
     *,
@@ -82,7 +84,38 @@ def _plan_text_layouts(image: Image.Image, replacements: list[TextReplacement]) 
                 role=role,
             )
         )
+    layouts = _stabilize_bottom_label_columns(layouts, image.size)
     return _resolve_text_collisions(layouts, image.size)
+
+
+def _stabilize_bottom_label_columns(layouts: list[TextLayout], image_size: tuple[int, int]) -> list[TextLayout]:
+    image_width, image_height = image_size
+    bottom_labels = [
+        layout
+        for layout in layouts
+        if layout.role == "label" and layout.replacement.region.y / max(1, image_height) > 0.82
+    ]
+    if len(bottom_labels) < 2:
+        return layouts
+
+    labels = sorted(bottom_labels, key=lambda layout: layout.replacement.region.x + layout.replacement.region.width / 2)
+    page_margin = max(18, int(image_width * 0.035))
+    column_gap = max(4, int(image_width * 0.008))
+    centers = [layout.replacement.region.x + layout.replacement.region.width / 2 for layout in labels]
+    boundaries = [float(page_margin)]
+    boundaries.extend((left + right) / 2 for left, right in zip(centers, centers[1:]))
+    boundaries.append(float(image_width - page_margin))
+
+    for index, layout in enumerate(labels):
+        left_bound = boundaries[index] + column_gap
+        right_bound = boundaries[index + 1] - column_gap
+        width = max(1, int(right_bound - left_bound))
+        region = layout.replacement.region
+        height = max(region.height, int(region.height * 1.55), int(image_height * 0.036))
+        top = max(0, min(image_height - height, region.y - (height - region.height) // 2))
+        _apply_candidate_box(layout, (int(left_bound), top, width, height), image_size)
+
+    return layouts
 
 
 def _draw_text_block(draw: ImageDraw.ImageDraw, layout: TextLayout) -> None:
@@ -103,7 +136,7 @@ def _draw_text_block(draw: ImageDraw.ImageDraw, layout: TextLayout) -> None:
 
 
 def _uses_top_alignment(role: str) -> bool:
-    return role in {"title", "subtitle"}
+    return role in {"title", "section_title", "subtitle"}
 
 
 def _text_content_bounds(layout: TextLayout) -> tuple[int, int, int, int]:
@@ -138,7 +171,7 @@ def _resolve_text_collisions(layouts: list[TextLayout], image_size: tuple[int, i
 
 
 def _layout_priority_key(layout: TextLayout) -> tuple[int, int, int]:
-    role_rank = {"title": 0, "subtitle": 1, "body": 2, "label": 3}
+    role_rank = {"title": 0, "section_title": 1, "subtitle": 2, "table_key": 3, "body": 4, "label": 5}
     return (
         role_rank.get(layout.role, 9),
         layout.replacement.region.y,
@@ -187,7 +220,7 @@ def _candidate_layout_boxes(
     y_step = max(4, min(36, int(max(height, layout.replacement.region.height) * 0.65)))
     x_step = max(8, min(54, int(width * 0.18)))
 
-    if layout.role in {"title", "subtitle"}:
+    if layout.role in {"title", "section_title", "subtitle"}:
         x_values = [x]
         prefer_positive_y = True
     else:
@@ -221,12 +254,16 @@ def _placement_band(
     if broad:
         if role in {"title", "subtitle"}:
             return margin_y, max(int(image_height * 0.26), y + height)
+        if role == "section_title":
+            return max(margin_y, y - int(image_height * 0.08)), min(image_height - margin_y, y + height + int(image_height * 0.10))
         if role == "label":
             return max(margin_y, int(image_height * 0.68)), image_height - margin_y
         return margin_y, image_height - margin_y
 
     if role in {"title", "subtitle"}:
         return margin_y, max(int(image_height * 0.22), y + height)
+    if role == "section_title":
+        return max(margin_y, y - int(image_height * 0.035)), min(image_height - margin_y, y + height + int(image_height * 0.05))
     if role == "label":
         top = max(margin_y, int(image_height * 0.70), y - max(height * 2, int(image_height * 0.05)))
         return top, image_height - margin_y
@@ -393,6 +430,12 @@ def _layout_box(region: TextRegion, image_size: tuple[int, int], role: str) -> t
         subtitle_height = max(height, int(region.height * 1.8), int(image_height * 0.035))
         return left, y, max(1, right - left), subtitle_height
 
+    if role == "section_title":
+        left = max(page_margin, min(x, int(image_width * 0.06)))
+        right = min(image_width - page_margin, max(x + width, int(image_width * 0.90)))
+        title_height = max(height, int(region.height * 1.2), int(image_height * 0.052))
+        return left, y, max(1, right - left), title_height
+
     if role == "label":
         label_width = min(
             image_width - page_margin * 2,
@@ -412,13 +455,21 @@ def _region_role(region: TextRegion, image_size: tuple[int, int]) -> str:
     y_ratio = region.y / max(1, image_height)
     width_ratio = region.width / max(1, image_width)
     height_ratio = region.height / max(1, image_height)
+    center_x_ratio = (region.x + region.width / 2) / max(1, image_width)
 
-    if y_ratio > 0.78:
+    if _is_micro_or_embedded_text(region, image_size):
+        return "micro"
+
+    if y_ratio > 0.78 and _looks_like_bottom_caption(region, image_size):
         return "label"
     if y_ratio < 0.20 and (height_ratio >= 0.035 or (y_ratio < 0.10 and width_ratio >= 0.36)):
         return "title"
+    if height_ratio >= 0.038 and width_ratio >= 0.18:
+        return "section_title"
     if y_ratio < 0.34 and width_ratio >= 0.28:
         return "subtitle"
+    if 0.10 <= y_ratio <= 0.62 and height_ratio >= 0.018 and center_x_ratio < 0.34:
+        return "table_key"
     if (
         0.30 <= y_ratio <= 0.78
         and region.width < max(80, int(image_width * 0.11))
@@ -426,6 +477,33 @@ def _region_role(region: TextRegion, image_size: tuple[int, int]) -> str:
     ):
         return "micro"
     return "body"
+
+
+def _is_micro_or_embedded_text(region: TextRegion, image_size: tuple[int, int]) -> bool:
+    image_width, image_height = image_size
+    y_ratio = region.y / max(1, image_height)
+    width_ratio = region.width / max(1, image_width)
+    height_ratio = region.height / max(1, image_height)
+    aspect = region.height / max(1, region.width)
+
+    if region.height < max(16, int(image_height * 0.014)):
+        return True
+    if width_ratio < 0.045 and aspect >= 2.7:
+        return True
+    if (
+        0.30 <= y_ratio <= 0.82
+        and region.width < max(80, int(image_width * 0.11))
+        and region.height < max(26, int(image_height * 0.020))
+    ):
+        return True
+    return False
+
+
+def _looks_like_bottom_caption(region: TextRegion, image_size: tuple[int, int]) -> bool:
+    image_width, image_height = image_size
+    width_ratio = region.width / max(1, image_width)
+    height_ratio = region.height / max(1, image_height)
+    return height_ratio >= 0.018 and width_ratio >= 0.055
 
 
 def _should_render_replacement(item: TextReplacement, image_size: tuple[int, int], role: str) -> bool:
@@ -445,15 +523,18 @@ def _estimate_text_color(image: Image.Image, region: TextRegion, role: str = "bo
         return (20, 20, 20)
     luminance = (0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1] + 0.0722 * arr[:, :, 2]).reshape(-1)
     median = float(np.median(luminance))
-    if role == "label" and median < 112:
+    if role == "label" and median < 128:
         return (255, 255, 255)
     if median >= 128:
-        selected = arr.reshape(-1, 3)[luminance <= np.percentile(luminance, 25)]
+        selected = arr.reshape(-1, 3)[luminance <= np.percentile(luminance, 12)]
     else:
-        selected = arr.reshape(-1, 3)[luminance >= np.percentile(luminance, 75)]
+        selected = arr.reshape(-1, 3)[luminance >= np.percentile(luminance, 88)]
     if selected.size == 0:
         return (20, 20, 20) if median >= 128 else (245, 245, 245)
     color = np.median(selected, axis=0)
+    selected_luminance = float(0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2])
+    if median >= 128 and selected_luminance > min(185, median - 10):
+        return (24, 24, 24)
     return tuple(int(max(0, min(255, value))) for value in color)
 
 
@@ -465,7 +546,7 @@ def _estimate_background_color(crop: Image.Image) -> tuple[int, int, int]:
 
 
 def _load_font(size: int, role: str = "body") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = BOLD_FONT_CANDIDATES + REGULAR_FONT_CANDIDATES if role in {"title", "label"} else REGULAR_FONT_CANDIDATES
+    candidates = BOLD_FONT_CANDIDATES + REGULAR_FONT_CANDIDATES if role in BOLD_ROLES else REGULAR_FONT_CANDIDATES
     for candidate in candidates:
         if Path(candidate).exists():
             return ImageFont.truetype(candidate, size=size)
@@ -477,6 +558,12 @@ def _fit_text(text: str, box_width: int, box_height: int, *, role: str = "body")
     max_size, min_size = _font_limits(role, box_height)
     max_lines = _max_lines_for_role(role)
     line_spacing = _line_spacing_for_role(role)
+    if role == "label":
+        for size in range(max_size, min_size - 1, -1):
+            font = _load_font(size, role)
+            lines = _wrap_text(clean_text, font, box_width, split_long_words=False)
+            if _text_block_fits(lines, font, box_width, box_height, line_spacing, max_lines=1):
+                return font, lines
     for size in range(max_size, min_size - 1, -1):
         font = _load_font(size, role)
         lines = _wrap_text(clean_text, font, box_width, split_long_words=False)
@@ -487,33 +574,35 @@ def _fit_text(text: str, box_width: int, box_height: int, *, role: str = "body")
 
 
 def _font_limits(role: str, box_height: int) -> tuple[int, int]:
-    if role == "title":
+    if role in {"title", "section_title"}:
         return max(22, min(44, int(box_height * 0.46))), 13
     if role == "subtitle":
         return max(10, min(22, int(box_height * 0.48))), 8
     if role == "label":
         return max(12, min(32, int(box_height * 0.66))), 8
+    if role == "table_key":
+        return max(9, min(24, int(box_height * 0.62))), 7
     return max(8, min(36, int(box_height * 0.62))), 7
 
 
 def _max_lines_for_role(role: str) -> int | None:
-    if role == "title":
+    if role in {"title", "section_title"}:
         return 3
     if role == "subtitle":
         return 3
     if role == "label":
-        return 1
+        return 2
     return 3
 
 
 def _alignment_for_role(role: str) -> str:
-    if role in {"title", "subtitle"}:
+    if role in {"title", "section_title", "subtitle"}:
         return "left"
     return "center"
 
 
 def _line_spacing_for_role(role: str) -> float:
-    if role == "title":
+    if role in {"title", "section_title"}:
         return 0.98
     if role == "label":
         return 0.96
