@@ -1,6 +1,6 @@
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from app.image_renderer import TextReplacement, _erase_box, _fit_text, _plan_text_layouts, _text_content_bounds
 from app.ocr import TextRegion
@@ -152,6 +152,27 @@ class ImageRendererTest(unittest.TestCase):
         self.assertGreaterEqual(second_bounds[1], first_bottom)
         self.assert_layouts_do_not_overlap(layouts)
 
+    def test_wrapped_title_keeps_display_scale(self):
+        image = Image.new("RGB", (790, 1340), "white")
+        region = TextRegion(
+            text="\u8d85\u6807\u81ea\u52a8\u62a5\u8b66",
+            confidence=0.99,
+            x=28,
+            y=18,
+            width=360,
+            height=42,
+            polygon=[(28, 18), (388, 18), (388, 60), (28, 60)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Automatic alarm when standards are exceeded")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 24)
+        self.assertLessEqual(len(layouts[0].lines), 3)
+
     def test_body_layouts_are_repositioned_to_avoid_collisions(self):
         image = Image.new("RGB", (640, 900), "white")
         screen_region = TextRegion(
@@ -183,6 +204,29 @@ class ImageRendererTest(unittest.TestCase):
 
         self.assertEqual(len(layouts), 2)
         self.assert_layouts_do_not_overlap(layouts)
+
+    def test_label_layout_keeps_banner_caption_style(self):
+        image = Image.new("RGB", (790, 1340), "white")
+        region = TextRegion(
+            text="\u706f\u5149\u62a5\u8b66",
+            confidence=0.99,
+            x=90,
+            y=1238,
+            width=120,
+            height=32,
+            polygon=[(90, 1238), (210, 1238), (210, 1270), (90, 1270)],
+        )
+        ImageDraw.Draw(image).rectangle((42, 1210, 270, 1284), fill=(0, 83, 245))
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Light alarm")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].lines, ["Light alarm"])
+        self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 20)
+        self.assertEqual(layouts[0].color, (255, 255, 255))
 
 
 if __name__ == "__main__":
