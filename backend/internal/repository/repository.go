@@ -121,6 +121,14 @@ func (r *Repository) CompleteJob(jobID string) error {
 	}).Error
 }
 
+func (r *Repository) FinishJob(jobID, status, errorMessage string) error {
+	updates := map[string]any{"status": status}
+	if strings.TrimSpace(errorMessage) != "" {
+		updates["error_message"] = errorMessage
+	}
+	return r.db.Model(&models.Job{}).Where("id = ?", jobID).Updates(updates).Error
+}
+
 func (r *Repository) SeedAdminData() error {
 	users := []struct {
 		username    string

@@ -19,6 +19,8 @@ type AIClient struct {
 	HTTPClient *http.Client
 }
 
+const aiTranslateMaxAttempts = 3
+
 type AITranslationResponse struct {
 	SourceFilename    string             `json:"source_filename"`
 	OutputFilename    string             `json:"output_filename"`
@@ -85,11 +87,34 @@ func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/translate-image", &body)
+	contentType := writer.FormDataContentType()
+	bodyBytes := append([]byte(nil), body.Bytes()...)
+
+	var lastErr error
+	for attempt := 1; attempt <= aiTranslateMaxAttempts; attempt++ {
+		payload, err := c.postTranslateImage(ctx, bodyBytes, contentType)
+		if err == nil {
+			return payload, nil
+		}
+		lastErr = err
+		if attempt >= aiTranslateMaxAttempts || !isRetryableAIError(err) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt) * 2 * time.Second):
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *AIClient) postTranslateImage(ctx context.Context, bodyBytes []byte, contentType string) (*AITranslationResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/translate-image", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -113,4 +138,20 @@ func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage
 		return nil, fmt.Errorf("ai-service did not return output_image_base64")
 	}
 	return &payload, nil
+}
+
+func isRetryableAIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "context canceled") || strings.Contains(message, "deadline exceeded") {
+		return false
+	}
+	return strings.Contains(message, "eof") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "server closed idle connection") ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "use of closed network connection")
 }

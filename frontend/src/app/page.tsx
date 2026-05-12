@@ -20,10 +20,12 @@ const STATUS_LABELS: Record<string, string> = {
   queued: "排队",
   processing: "处理中",
   completed: "已完成",
+  partial: "部分完成",
   failed: "失败",
 };
 
 type QueueStatus = "completed" | "processing" | "queued" | "failed";
+type RecognitionMode = "auto" | "manual";
 type RegionMap = Record<string, ManualRegion[]>;
 type DemoKind = "shield" | "welder" | "params" | "device" | "cable" | "box" | "manual" | "parts";
 
@@ -63,6 +65,7 @@ export default function Home() {
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [recognitionMode, setRecognitionMode] = useState<RecognitionMode>("manual");
   const [manualRegions, setManualRegions] = useState<RegionMap>({});
   const [selectedRegionFileKey, setSelectedRegionFileKey] = useState("");
   const [userToken, setUserToken] = useState("");
@@ -91,7 +94,9 @@ export default function Home() {
   const visibleTotal = job?.total || (files.length ? files.length : 30);
   const visibleCompleted = job?.completed ?? (files.length ? resultCount : 7);
   const downloadHref =
-    job?.status === "completed" && job.download_url ? `${apiURL(job.download_url)}?token=${encodeURIComponent(userToken)}` : "";
+    (job?.status === "completed" || job?.status === "partial") && job.download_url
+      ? `${apiURL(job.download_url)}?token=${encodeURIComponent(userToken)}`
+      : "";
 
   const refreshJob = useCallback(async () => {
     if (!job?.job_id || !userToken) {
@@ -101,7 +106,7 @@ export default function Home() {
       const nextJob = await fetchJob(job.job_id, userToken);
       renderJobState(nextJob, setWorkflowState, setStatusText, setProgress);
       setJob(nextJob);
-      if (nextJob.status === "completed" || nextJob.status === "failed") {
+      if (nextJob.status === "completed" || nextJob.status === "failed" || nextJob.status === "partial") {
         setIsSubmitting(false);
       }
     } catch (error) {
@@ -139,7 +144,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!job?.job_id || job.status === "completed" || job.status === "failed") {
+    if (!job?.job_id || job.status === "completed" || job.status === "failed" || job.status === "partial") {
       return;
     }
     const timer = window.setInterval(refreshJob, 1200);
@@ -300,7 +305,7 @@ export default function Home() {
     setProgress(3);
 
     try {
-      const regionsByFile = files.map((file) => manualRegions[fileKey(file)] || []);
+      const regionsByFile = recognitionMode === "manual" ? files.map((file) => manualRegions[fileKey(file)] || []) : [];
       const createdJob = await createJob(files, sourceLanguage, targetLanguage, {
         token: userToken,
         manualRegions: regionsByFile,
@@ -393,6 +398,8 @@ export default function Home() {
               filesCount={files.length}
               statusText={statusText}
               workflowState={workflowState}
+              recognitionMode={recognitionMode}
+              onRecognitionModeChange={setRecognitionMode}
               onAddRegion={(region) => {
                 if (selectedFile) {
                   updateRegionsForFile(selectedFile, (currentRegions) => [...currentRegions, region].slice(0, 20));
@@ -573,6 +580,8 @@ function ImageEditorPanel({
   filesCount,
   statusText,
   workflowState,
+  recognitionMode,
+  onRecognitionModeChange,
   onAddRegion,
   onChangeRegion,
   onDeleteRegion,
@@ -583,6 +592,8 @@ function ImageEditorPanel({
   filesCount: number;
   statusText: string;
   workflowState: string;
+  recognitionMode: RecognitionMode;
+  onRecognitionModeChange: (mode: RecognitionMode) => void;
   onAddRegion: (region: ManualRegion) => void;
   onChangeRegion: (index: number, region: ManualRegion) => void;
   onDeleteRegion: (index: number) => void;
@@ -596,15 +607,34 @@ function ImageEditorPanel({
     }
   }, [regions.length, selectedRegionIndex]);
 
-  const hasRegions = regions.length > 0;
-  const selectedRegionExists = selectedRegionIndex >= 0 && selectedRegionIndex < regions.length;
+  const isManualMode = recognitionMode === "manual";
+  const visibleRegions = isManualMode ? regions : [];
+  const hasRegions = visibleRegions.length > 0;
+  const selectedRegionExists = isManualMode && selectedRegionIndex >= 0 && selectedRegionIndex < visibleRegions.length;
+  const hintText = !filesCount
+    ? "当前显示示例图，添加图片后即可框选真实区域"
+    : isManualMode
+      ? "拖拽框选区域，调整大小和位置"
+      : "自动识别会扫描整张图，无需框选区域";
 
   return (
     <section className="canvas-panel">
       <div className="canvas-toolbar">
         <div className="segmented-control" aria-label="识别模式">
-          <button type="button">自动识别</button>
-          <button className="active" type="button">
+          <button
+            className={recognitionMode === "auto" ? "active" : ""}
+            type="button"
+            aria-pressed={recognitionMode === "auto"}
+            onClick={() => onRecognitionModeChange("auto")}
+          >
+            自动识别
+          </button>
+          <button
+            className={recognitionMode === "manual" ? "active" : ""}
+            type="button"
+            aria-pressed={recognitionMode === "manual"}
+            onClick={() => onRecognitionModeChange("manual")}
+          >
             手动框选
           </button>
         </div>
@@ -630,7 +660,8 @@ function ImageEditorPanel({
         {file ? (
           <ManualImageCanvas
             file={file}
-            regions={regions}
+            regions={visibleRegions}
+            readOnly={!isManualMode}
             selectedRegionIndex={selectedRegionIndex}
             onSelectRegion={setSelectedRegionIndex}
             onAddRegion={(region) => {
@@ -646,7 +677,7 @@ function ImageEditorPanel({
 
       <div className="canvas-hint-row">
         <span className="info-dot">i</span>
-        <span>{filesCount ? "拖拽框选区域，调整大小和位置" : "当前显示示例图，添加图片后即可框选真实区域"}</span>
+        <span>{hintText}</span>
         <span className="hint-separator">|</span>
         <button
           className="text-tool-button"
@@ -670,6 +701,7 @@ function ImageEditorPanel({
 function ManualImageCanvas({
   file,
   regions,
+  readOnly,
   selectedRegionIndex,
   onSelectRegion,
   onAddRegion,
@@ -677,6 +709,7 @@ function ManualImageCanvas({
 }: {
   file: File;
   regions: ManualRegion[];
+  readOnly: boolean;
   selectedRegionIndex: number;
   onSelectRegion: (index: number) => void;
   onAddRegion: (region: ManualRegion) => void;
@@ -686,6 +719,13 @@ function ManualImageCanvas({
   const frameRef = useRef<HTMLDivElement | null>(null);
   const [action, setAction] = useState<CanvasAction | null>(null);
   const [draftRegion, setDraftRegion] = useState<ManualRegion | null>(null);
+
+  useEffect(() => {
+    if (readOnly) {
+      setAction(null);
+      setDraftRegion(null);
+    }
+  }, [readOnly]);
 
   function normalizedPoint(event: ReactPointerEvent<HTMLElement>) {
     const rect = frameRef.current?.getBoundingClientRect();
@@ -701,7 +741,7 @@ function ManualImageCanvas({
   }
 
   function handleFramePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) {
+    if (readOnly || event.button !== 0) {
       return;
     }
     event.preventDefault();
@@ -713,7 +753,7 @@ function ManualImageCanvas({
   }
 
   function handleRegionPointerDown(event: ReactPointerEvent<HTMLSpanElement>, index: number) {
-    if (event.button !== 0) {
+    if (readOnly || event.button !== 0) {
       return;
     }
     event.preventDefault();
@@ -725,7 +765,7 @@ function ManualImageCanvas({
   }
 
   function handleResizePointerDown(event: ReactPointerEvent<HTMLSpanElement>, index: number) {
-    if (event.button !== 0) {
+    if (readOnly || event.button !== 0) {
       return;
     }
     event.preventDefault();
@@ -737,7 +777,7 @@ function ManualImageCanvas({
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!action) {
+    if (readOnly || !action) {
       return;
     }
     event.preventDefault();
@@ -769,7 +809,7 @@ function ManualImageCanvas({
   }
 
   function finishPointer(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!action) {
+    if (readOnly || !action) {
       return;
     }
     event.preventDefault();
@@ -782,7 +822,7 @@ function ManualImageCanvas({
 
   return (
     <div
-      className="image-stage"
+      className={`image-stage${readOnly ? " read-only" : ""}`}
       ref={frameRef}
       onPointerDown={handleFramePointerDown}
       onPointerMove={handlePointerMove}
@@ -1087,7 +1127,7 @@ function buildQueueRows(files: File[], job: TranslationJob | null): QueueRow[] {
     if (completedNames.has(file.name) || (job?.status === "completed" && index < completedCount)) {
       status = "completed";
       itemProgress = 100;
-    } else if (job?.status === "failed" && index >= completedCount) {
+    } else if (job?.status === "failed" || job?.status === "partial") {
       status = "failed";
     } else if (job?.status === "processing" && index === completedCount) {
       status = "processing";
@@ -1121,6 +1161,8 @@ function renderJobState(
   setStatusText(
     job.status === "failed"
       ? `处理失败：${job.error || "未知错误"}`
+      : job.status === "partial"
+        ? `部分完成：${job.completed}/${job.total} 张成功，失败项可重跑或下载已生成结果。`
       : `${statusLabel} · ${job.completed}/${job.total} 张 · ${Math.round(nextProgress)}%`,
   );
 }

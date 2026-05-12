@@ -9,6 +9,7 @@ const (
 	StatusQueued     = "queued"
 	StatusProcessing = "processing"
 	StatusCompleted  = "completed"
+	StatusPartial    = "partial"
 	StatusFailed     = "failed"
 )
 
@@ -216,7 +217,7 @@ func (j Job) ToResponse(fileURL func(jobID, filename string) string) JobResponse
 		progress = float64(j.Completed) / float64(j.Total) * 100
 	}
 	var downloadURL *string
-	if j.Status == StatusCompleted {
+	if j.Status == StatusCompleted || j.Status == StatusPartial {
 		value := "/api/jobs/" + j.ID + "/download"
 		downloadURL = &value
 	}

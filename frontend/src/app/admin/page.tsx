@@ -39,6 +39,7 @@ const STATUS_LABELS: Record<string, string> = {
   queued: "排队",
   processing: "处理中",
   completed: "已完成",
+  partial: "部分完成",
   failed: "失败",
 };
 

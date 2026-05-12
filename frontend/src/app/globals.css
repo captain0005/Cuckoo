@@ -1760,6 +1760,11 @@ select {
   user-select: none;
 }
 
+.image-stage.read-only {
+  cursor: default;
+  touch-action: pan-x pan-y;
+}
+
 .image-stage img {
   width: auto;
   max-width: 100%;

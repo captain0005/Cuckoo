@@ -56,11 +56,36 @@ func New(cfg config.Config, repo *repository.Repository) *Handler {
 }
 
 func (h *Handler) Health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+	aiStatus, aiDetail := h.aiHealth()
+	payload := gin.H{
 		"status":     "ok",
 		"service":    "backend",
 		"ai_service": h.cfg.AIServiceURL,
-	})
+		"ai_status":  aiStatus,
+	}
+	if aiDetail != "" {
+		payload["ai_error"] = aiDetail
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func (h *Handler) aiHealth() (string, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.cfg.AIServiceURL+"/health", nil)
+	if err != nil {
+		return "invalid", err.Error()
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		return "unreachable", err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "unhealthy", resp.Status
+	}
+	return "ok", ""
 }
 
 func (h *Handler) CreateJob(c *gin.Context) {
@@ -166,7 +191,7 @@ func (h *Handler) DownloadJob(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
 		return
 	}
-	if job.Status != models.StatusCompleted {
+	if job.Status != models.StatusCompleted && job.Status != models.StatusPartial {
 		c.JSON(http.StatusConflict, gin.H{"detail": "job is not completed yet"})
 		return
 	}
@@ -190,7 +215,7 @@ func (h *Handler) ExportJobToFolder(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
 		return
 	}
-	if job.Status != models.StatusCompleted {
+	if job.Status != models.StatusCompleted && job.Status != models.StatusPartial {
 		c.JSON(http.StatusConflict, gin.H{"detail": "job is not completed yet"})
 		return
 	}
@@ -271,21 +296,23 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 		return
 	}
 
+	successes := 0
+	failures := make([]string, 0)
 	for _, upload := range uploads {
 		result, err := h.aiClient.TranslateImage(ctx, upload.InputPath, sourceLanguage, targetLanguage, inpaintEngine, upload.ManualRegions)
 		if err != nil {
-			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
-			return
+			failures = append(failures, upload.SourceFilename+": "+err.Error())
+			continue
 		}
 
 		rawImage, err := base64.StdEncoding.DecodeString(result.OutputImageBase64)
 		if err != nil {
-			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
-			return
+			failures = append(failures, upload.SourceFilename+": "+err.Error())
+			continue
 		}
 		if err := os.WriteFile(upload.OutputPath, rawImage, 0o644); err != nil {
-			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
-			return
+			failures = append(failures, upload.SourceFilename+": "+err.Error())
+			continue
 		}
 
 		entries := make([]models.TranslationEntry, 0, len(result.Entries))
@@ -311,6 +338,16 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
 			return
 		}
+		successes++
+	}
+	if len(failures) > 0 {
+		message := strings.Join(failures, "; ")
+		if successes > 0 {
+			_ = h.repo.FinishJob(jobID, models.StatusPartial, "部分图片失败："+message)
+			return
+		}
+		_ = h.repo.SetJobStatus(jobID, models.StatusFailed, message)
+		return
 	}
 	_ = h.repo.CompleteJob(jobID)
 }

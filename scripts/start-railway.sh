@@ -22,11 +22,23 @@ urllib.request.urlretrieve(url, destination)
 PY
 fi
 
-uvicorn app.main:app --host 127.0.0.1 --port 9000 --app-dir /app/ai-service &
+start_ai() {
+  while true; do
+    set +e
+    uvicorn app.main:app --host 127.0.0.1 --port 9000 --app-dir /app/ai-service
+    code="$?"
+    set -e
+    echo "AI service exited with status ${code}; restarting in 2s" >&2
+    sleep 2
+  done
+}
+
+start_ai &
 AI_PID="$!"
 
 cleanup() {
   kill "$AI_PID" 2>/dev/null || true
+  wait "$AI_PID" 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
 
