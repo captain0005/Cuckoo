@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import {
   adminLogin,
   createAdminUser,
@@ -35,6 +36,10 @@ const ROLE_LABELS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   active: "启用",
   disabled: "停用",
+  queued: "排队",
+  processing: "处理中",
+  completed: "已完成",
+  failed: "失败",
 };
 
 export default function AdminPage() {
@@ -52,19 +57,18 @@ export default function AdminPage() {
   const [message, setMessage] = useState("请登录后台。");
   const [isBusy, setIsBusy] = useState(false);
 
-  const stats = useMemo(() => {
-    return {
+  const stats = useMemo(
+    () => ({
       users: users.length,
       active: users.filter((item) => item.status === "active").length,
       jobs: usage.reduce((sum, item) => sum + Number(item.jobs || 0), 0),
       images: usage.reduce((sum, item) => sum + Number(item.images || 0), 0),
       characters: usage.reduce((sum, item) => sum + Number(item.source_characters || 0), 0),
-    };
-  }, [users, usage]);
+    }),
+    [users, usage],
+  );
 
-  const usageByUser = useMemo(() => {
-    return new Map(usage.map((item) => [item.user_id, item]));
-  }, [usage]);
+  const usageByUser = useMemo(() => new Map(usage.map((item) => [item.user_id, item])), [usage]);
 
   useEffect(() => {
     const savedToken = window.localStorage.getItem("cuckoo_admin_token") || "";
@@ -72,12 +76,18 @@ export default function AdminPage() {
     if (!savedToken || !savedUser) {
       return;
     }
-    setToken(savedToken);
-    setCurrentUser(JSON.parse(savedUser) as AdminUser);
-    void loadAdminData(savedToken);
+    try {
+      setToken(savedToken);
+      setCurrentUser(JSON.parse(savedUser) as AdminUser);
+      void loadAdminData(savedToken);
+    } catch {
+      window.localStorage.removeItem("cuckoo_admin_token");
+      window.localStorage.removeItem("cuckoo_admin_user");
+      setMessage("登录信息已失效，请重新登录。");
+    }
   }, []);
 
-  async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsBusy(true);
     setMessage("正在登录...");
@@ -118,10 +128,7 @@ export default function AdminPage() {
       return;
     }
     try {
-      const [keyPayload, jobsPayload] = await Promise.all([
-        fetchAdminAPIKeys(token, userID),
-        fetchAdminJobs(token, userID),
-      ]);
+      const [keyPayload, jobsPayload] = await Promise.all([fetchAdminAPIKeys(token, userID), fetchAdminJobs(token, userID)]);
       setAPIKeys(keyPayload.api_keys);
       setJobs(jobsPayload.jobs);
     } catch (error) {
@@ -129,7 +136,7 @@ export default function AdminPage() {
     }
   }
 
-  async function submitUser(event: React.FormEvent<HTMLFormElement>) {
+  async function submitUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token) {
       return;
@@ -170,7 +177,7 @@ export default function AdminPage() {
     if (!token) {
       return;
     }
-    const ok = window.confirm(`删除用户 ${user.username}？`);
+    const ok = window.confirm(`确定删除用户 ${user.username} 吗？`);
     if (!ok) {
       return;
     }
@@ -206,16 +213,16 @@ export default function AdminPage() {
           <div>
             <p className="eyebrow">Admin</p>
             <h1>Cuckoo 管理后台</h1>
-            <p className="admin-muted">用户、角色和 API Key 用量管理。</p>
+            <p className="admin-muted">用户、角色、API Key 和用量数据管理。</p>
           </div>
           <form className="admin-form" onSubmit={handleLogin}>
             <label>
               账号
-              <input value={loginName} onChange={(event) => setLoginName(event.target.value)} />
+              <input value={loginName} onChange={(event) => setLoginName(event.target.value)} autoComplete="username" />
             </label>
             <label>
               密码
-              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
             </label>
             <button type="submit" disabled={isBusy}>
               登录后台
@@ -321,10 +328,13 @@ export default function AdminPage() {
               <h2>{editingID ? "编辑用户" : "新增用户"}</h2>
             </div>
             {editingID ? (
-              <button type="button" onClick={() => {
-                setEditingID(null);
-                setForm(EMPTY_USER);
-              }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingID(null);
+                  setForm(EMPTY_USER);
+                }}
+              >
                 取消
               </button>
             ) : null}
@@ -382,17 +392,7 @@ export default function AdminPage() {
             <p className="eyebrow">Jobs</p>
             <h2>用户任务记录</h2>
           </div>
-          <label className="admin-filter">
-            用户
-            <select value={selectedUserID} onChange={(event) => void refreshUserFilter(event.target.value)}>
-              <option value="">全部用户</option>
-              {users.map((user) => (
-                <option key={user.id} value={user.id}>
-                  {user.username}
-                </option>
-              ))}
-            </select>
-          </label>
+          <UserFilter users={users} selectedUserID={selectedUserID} onChange={(userID) => void refreshUserFilter(userID)} />
         </div>
         <div className="admin-table-wrap">
           <table className="admin-table">
@@ -446,17 +446,7 @@ export default function AdminPage() {
             <p className="eyebrow">API Keys</p>
             <h2>用户 API Key 数据</h2>
           </div>
-          <label className="admin-filter">
-            用户
-            <select value={selectedUserID} onChange={(event) => void refreshUserFilter(event.target.value)}>
-              <option value="">全部用户</option>
-              {users.map((user) => (
-                <option key={user.id} value={user.id}>
-                  {user.username}
-                </option>
-              ))}
-            </select>
-          </label>
+          <UserFilter users={users} selectedUserID={selectedUserID} onChange={(userID) => void refreshUserFilter(userID)} />
         </div>
         <div className="admin-table-wrap">
           <table className="admin-table">
@@ -478,7 +468,9 @@ export default function AdminPage() {
                   <td>{item.provider}</td>
                   <td>
                     <strong>{item.key_name}</strong>
-                    <span>{item.masked_key} · {item.key_fingerprint}</span>
+                    <span>
+                      {item.masked_key} · {item.key_fingerprint}
+                    </span>
                   </td>
                   <td>
                     <span className={`admin-pill ${item.status}`}>{STATUS_LABELS[item.status] || item.status}</span>
@@ -498,6 +490,30 @@ export default function AdminPage() {
         </div>
       </section>
     </main>
+  );
+}
+
+function UserFilter({
+  users,
+  selectedUserID,
+  onChange,
+}: {
+  users: AdminUser[];
+  selectedUserID: string;
+  onChange: (userID: string) => void;
+}) {
+  return (
+    <label className="admin-filter">
+      用户
+      <select value={selectedUserID} onChange={(event) => onChange(event.target.value)}>
+        <option value="">全部用户</option>
+        {users.map((user) => (
+          <option key={user.id} value={user.id}>
+            {user.username}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
