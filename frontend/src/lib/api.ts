@@ -103,7 +103,7 @@ export type AdminUserPayload = {
 };
 
 const PRODUCTION_API_BASE_URL = "https://cuckoo-production.up.railway.app";
-const LOCAL_API_BASE_URL = "http://127.0.0.1:8080";
+const LOCAL_API_BASE_URL = "http://127.0.0.1:8081";
 const configuredAPIBaseURL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   (process.env.NODE_ENV === "production" ? PRODUCTION_API_BASE_URL : LOCAL_API_BASE_URL);
