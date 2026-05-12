@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/6602966029/cuckoo/backend/internal/config"
@@ -90,6 +91,9 @@ func appendUniqueOrigin(origins []string, origin string) []string {
 }
 
 func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) string {
+	if isCuckooVercelOrigin(requestOrigin) {
+		return requestOrigin
+	}
 	for _, allowedOrigin := range allowedOrigins {
 		if allowedOrigin == "*" {
 			return "*"
@@ -102,4 +106,20 @@ func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) stri
 		return allowedOrigins[0]
 	}
 	return ""
+}
+
+func isCuckooVercelOrigin(requestOrigin string) bool {
+	if strings.TrimSpace(requestOrigin) == "" {
+		return false
+	}
+	parsed, err := url.Parse(requestOrigin)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "cuckoo-black.vercel.app" ||
+		(strings.HasPrefix(host, "cuckoo-") && strings.HasSuffix(host, ".vercel.app"))
 }
