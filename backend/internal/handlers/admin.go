@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,9 +77,44 @@ func (h *Handler) AdminLogin(c *gin.Context) {
 	})
 }
 
+func (h *Handler) UserLogin(c *gin.Context) {
+	var req loginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid login payload"})
+		return
+	}
+
+	user, err := h.repo.GetUserByUsername(req.Username)
+	if err != nil || user.Status != models.UserStatusActive || !repository.CheckPassword(req.Password, user.PasswordHash) {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "invalid username or password"})
+		return
+	}
+
+	if err := h.repo.TouchLastLogin(user.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	user.LastLoginAt = ptrTime(time.Now())
+
+	token, err := h.signAdminToken(adminClaims{
+		UserID: user.ID,
+		Role:   user.Role,
+		Exp:    time.Now().Add(24 * time.Hour).Unix(),
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user":  user.ToResponse(),
+	})
+}
+
 func (h *Handler) RequireAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+		token := tokenFromRequest(c)
 		claims, err := h.verifyAdminToken(token)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "admin login required"})
@@ -98,6 +134,33 @@ func (h *Handler) RequireAdmin() gin.HandlerFunc {
 	}
 }
 
+func (h *Handler) RequireUser() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := tokenFromRequest(c)
+		claims, err := h.verifyAdminToken(token)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+			return
+		}
+		user, err := h.repo.GetUser(claims.UserID)
+		if err != nil || user.Status != models.UserStatusActive {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+			return
+		}
+		c.Set("current_user", user)
+		c.Next()
+	}
+}
+
+func (h *Handler) CurrentUser(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": user.ToResponse()})
+}
+
 func (h *Handler) ListAdminUsers(c *gin.Context) {
 	users, err := h.repo.ListUsers()
 	if err != nil {
@@ -110,6 +173,28 @@ func (h *Handler) ListAdminUsers(c *gin.Context) {
 		items = append(items, user.ToResponse())
 	}
 	c.JSON(http.StatusOK, gin.H{"users": items})
+}
+
+func (h *Handler) ListAdminUsage(c *gin.Context) {
+	items, err := h.repo.ListUserUsage(c.Query("user_id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"usage": items})
+}
+
+func (h *Handler) ListAdminJobs(c *gin.Context) {
+	jobs, err := h.repo.ListJobs(c.Query("user_id"), queryInt(c, "limit", 100))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	items := make([]models.JobResponse, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, job.ToResponse(h.cfg.PublicFileURL))
+	}
+	c.JSON(http.StatusOK, gin.H{"jobs": items})
 }
 
 func (h *Handler) CreateAdminUser(c *gin.Context) {
@@ -335,6 +420,38 @@ func validStatus(status string) bool {
 
 func isAdminRole(role string) bool {
 	return role == models.RoleSuperAdmin || role == models.RoleAdmin
+}
+
+func currentUser(c *gin.Context) (*models.User, bool) {
+	value, ok := c.Get("current_user")
+	if !ok {
+		value, ok = c.Get("admin_user")
+	}
+	if !ok {
+		return nil, false
+	}
+	user, ok := value.(*models.User)
+	return user, ok
+}
+
+func tokenFromRequest(c *gin.Context) string {
+	token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	if token == "" && c.Request.Method == http.MethodGet {
+		token = strings.TrimSpace(c.Query("token"))
+	}
+	return token
+}
+
+func queryInt(c *gin.Context, key string, fallback int) int {
+	value := strings.TrimSpace(c.Query(key))
+	if value == "" {
+		return fallback
+	}
+	result, err := strconv.Atoi(value)
+	if err != nil || result <= 0 {
+		return fallback
+	}
+	return result
 }
 
 func ptrTime(value time.Time) *time.Time {

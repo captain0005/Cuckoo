@@ -24,16 +24,22 @@ const (
 )
 
 type Job struct {
-	ID             string `gorm:"primaryKey"`
-	Status         string `gorm:"index"`
-	SourceLanguage string
-	TargetLanguage string
-	Total          int
-	Completed      int
-	ErrorMessage   string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	Results        []JobResult `gorm:"foreignKey:JobID;constraint:OnDelete:CASCADE"`
+	ID                   string `gorm:"primaryKey"`
+	UserID               string `gorm:"index"`
+	Status               string `gorm:"index"`
+	SourceLanguage       string
+	TargetLanguage       string
+	Total                int
+	Completed            int
+	RegionsDetected      int
+	RegionsReplaced      int
+	SourceCharacters     int
+	TranslatedCharacters int
+	ErrorMessage         string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	User                 User        `gorm:"foreignKey:UserID"`
+	Results              []JobResult `gorm:"foreignKey:JobID;constraint:OnDelete:CASCADE"`
 }
 
 type User struct {
@@ -90,6 +96,22 @@ type UserResponse struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
+type UserUsageResponse struct {
+	UserID               string     `json:"user_id"`
+	Username             string     `json:"username"`
+	DisplayName          string     `json:"display_name"`
+	Role                 string     `json:"role"`
+	Status               string     `json:"status"`
+	Jobs                 int        `json:"jobs"`
+	Images               int        `json:"images"`
+	CompletedImages      int        `json:"completed_images"`
+	RegionsDetected      int        `json:"regions_detected"`
+	RegionsReplaced      int        `json:"regions_replaced"`
+	SourceCharacters     int        `json:"source_characters"`
+	TranslatedCharacters int        `json:"translated_characters"`
+	LastJobAt            *time.Time `json:"last_job_at"`
+}
+
 type APIKeyRecordResponse struct {
 	ID              string     `json:"id"`
 	UserID          string     `json:"user_id"`
@@ -121,6 +143,27 @@ type JobResultResponse struct {
 	RegionsReplaced int                `json:"regions_replaced"`
 	Entries         []TranslationEntry `json:"entries"`
 	Warnings        []string           `json:"warnings"`
+}
+
+type JobResponse struct {
+	JobID                string              `json:"job_id"`
+	UserID               string              `json:"user_id"`
+	Username             string              `json:"username"`
+	Status               string              `json:"status"`
+	Progress             float64             `json:"progress"`
+	Completed            int                 `json:"completed"`
+	Total                int                 `json:"total"`
+	SourceLanguage       string              `json:"source_language"`
+	TargetLanguage       string              `json:"target_language"`
+	RegionsDetected      int                 `json:"regions_detected"`
+	RegionsReplaced      int                 `json:"regions_replaced"`
+	SourceCharacters     int                 `json:"source_characters"`
+	TranslatedCharacters int                 `json:"translated_characters"`
+	Error                string              `json:"error"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            time.Time           `json:"updated_at"`
+	DownloadURL          *string             `json:"download_url"`
+	Results              []JobResultResponse `json:"results"`
 }
 
 func (u User) ToResponse() UserResponse {
@@ -164,6 +207,42 @@ func (r JobResult) ToResponse(fileURL string) JobResultResponse {
 		RegionsReplaced: r.RegionsReplaced,
 		Entries:         decodeEntries(r.EntriesJSON),
 		Warnings:        decodeStrings(r.WarningsJSON),
+	}
+}
+
+func (j Job) ToResponse(fileURL func(jobID, filename string) string) JobResponse {
+	progress := 0.0
+	if j.Total > 0 {
+		progress = float64(j.Completed) / float64(j.Total) * 100
+	}
+	var downloadURL *string
+	if j.Status == StatusCompleted {
+		value := "/api/jobs/" + j.ID + "/download"
+		downloadURL = &value
+	}
+	results := make([]JobResultResponse, 0, len(j.Results))
+	for _, result := range j.Results {
+		results = append(results, result.ToResponse(fileURL(j.ID, result.OutputFilename)))
+	}
+	return JobResponse{
+		JobID:                j.ID,
+		UserID:               j.UserID,
+		Username:             j.User.Username,
+		Status:               j.Status,
+		Progress:             progress,
+		Completed:            j.Completed,
+		Total:                j.Total,
+		SourceLanguage:       j.SourceLanguage,
+		TargetLanguage:       j.TargetLanguage,
+		RegionsDetected:      j.RegionsDetected,
+		RegionsReplaced:      j.RegionsReplaced,
+		SourceCharacters:     j.SourceCharacters,
+		TranslatedCharacters: j.TranslatedCharacters,
+		Error:                j.ErrorMessage,
+		CreatedAt:            j.CreatedAt,
+		UpdatedAt:            j.UpdatedAt,
+		DownloadURL:          downloadURL,
+		Results:              results,
 	}
 }
 

@@ -5,12 +5,17 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from app.ocr import TextRegion
-from app.pipeline import ImageTranslationPipeline, StaticOcrRecognizer
+from app.pipeline import ImageTranslationPipeline, ManualRegion, StaticOcrRecognizer
 
 
 class StubTranslator:
     def translate(self, text, source_language, target_language):
         return "3-in-1 EMF Detector"
+
+
+class EchoTranslator:
+    def translate(self, text, source_language, target_language):
+        return f"EN:{text}"
 
 
 class PipelineTest(unittest.TestCase):
@@ -115,6 +120,37 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(result.regions_replaced, 0)
             self.assertEqual(result.entries, [])
             self.assertTrue(any("small OCR text" in warning for warning in result.warnings))
+            self.assertTrue(output_path.exists())
+
+    def test_manual_regions_translate_only_selected_area_and_group_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "input.png"
+            output_path = root / "output.png"
+            Image.new("RGB", (400, 240), "white").save(input_path)
+
+            regions = [
+                TextRegion("\u5b9e\u529b", 0.99, 80, 80, 70, 30, [(80, 80), (150, 80), (150, 110), (80, 110)]),
+                TextRegion("\u6e90\u5934", 0.98, 82, 118, 70, 30, [(82, 118), (152, 118), (152, 148), (82, 148)]),
+                TextRegion("\u4e0d\u7ffb\u8bd1", 0.99, 280, 80, 80, 30, [(280, 80), (360, 80), (360, 110), (280, 110)]),
+            ]
+            pipeline = ImageTranslationPipeline(
+                recognizer=StaticOcrRecognizer(regions),
+                translator=EchoTranslator(),
+            )
+
+            result = pipeline.process_image(
+                input_path=input_path,
+                output_path=output_path,
+                source_filename="input.png",
+                manual_regions=[ManualRegion(x=0.15, y=0.25, width=0.32, height=0.45)],
+                inpaint_engine="opencv",
+            )
+
+            self.assertEqual(result.regions_detected, 3)
+            self.assertEqual(result.regions_replaced, 1)
+            self.assertEqual(result.entries[0].source_text, "\u5b9e\u529b \u6e90\u5934")
+            self.assertEqual(result.entries[0].translated_text, "EN:\u5b9e\u529b \u6e90\u5934")
             self.assertTrue(output_path.exists())
 
 

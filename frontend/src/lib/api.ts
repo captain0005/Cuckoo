@@ -17,17 +17,30 @@ export type JobResult = {
 
 export type TranslationJob = {
   job_id: string;
+  user_id: string;
+  username: string;
   status: "queued" | "processing" | "completed" | "failed" | string;
   progress: number;
   completed: number;
   total: number;
   source_language: string;
   target_language: string;
+  regions_detected: number;
+  regions_replaced: number;
+  source_characters: number;
+  translated_characters: number;
   error: string;
   created_at: string;
   updated_at: string;
   download_url: string | null;
   results: JobResult[];
+};
+
+export type ManualRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 export type FolderExportResult = {
@@ -64,6 +77,22 @@ export type AdminAPIKey = {
   updated_at: string;
 };
 
+export type AdminUsage = {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: string;
+  status: string;
+  jobs: number;
+  images: number;
+  completed_images: number;
+  regions_detected: number;
+  regions_replaced: number;
+  source_characters: number;
+  translated_characters: number;
+  last_job_at: string | null;
+};
+
 export type AdminUserPayload = {
   username: string;
   display_name: string;
@@ -89,30 +118,66 @@ export function apiURL(path: string) {
   return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-export async function createJob(files: File[], sourceLanguage: string, targetLanguage: string) {
+export async function userLogin(username: string, password: string) {
+  const response = await fetch(apiURL("/api/auth/login"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  return parseResponse<{ token: string; user: AdminUser }>(response);
+}
+
+export async function fetchMe(token: string) {
+  const response = await fetch(apiURL("/api/me"), {
+    headers: authHeaders(token),
+    cache: "no-store",
+  });
+  return parseResponse<{ user: AdminUser }>(response);
+}
+
+export async function createJob(
+  files: File[],
+  sourceLanguage: string,
+  targetLanguage: string,
+  options: { token: string; manualRegions?: ManualRegion[][]; inpaintEngine?: string },
+) {
   const payload = new FormData();
   files.forEach((file) => payload.append("files", file));
   payload.append("source_language", sourceLanguage);
   payload.append("target_language", targetLanguage);
+  payload.append("inpaint_engine", options.inpaintEngine || "lama");
+  if (options.manualRegions?.some((regions) => regions.length > 0)) {
+    payload.append("manual_regions", JSON.stringify(options.manualRegions));
+  }
 
   const response = await fetch(apiURL("/api/jobs"), {
     method: "POST",
+    headers: bearerHeaders(options.token),
     body: payload,
   });
   return parseResponse<TranslationJob>(response);
 }
 
-export async function fetchJob(jobID: string) {
+export async function fetchJob(jobID: string, token: string) {
   const response = await fetch(apiURL(`/api/jobs/${jobID}`), {
+    headers: authHeaders(token),
     cache: "no-store",
   });
   return parseResponse<TranslationJob>(response);
 }
 
-export async function exportJobToFolder(jobID: string, directory: string, overwrite = false) {
+export async function fetchUserJobs(token: string) {
+  const response = await fetch(apiURL("/api/jobs"), {
+    headers: authHeaders(token),
+    cache: "no-store",
+  });
+  return parseResponse<{ jobs: TranslationJob[] }>(response);
+}
+
+export async function exportJobToFolder(jobID: string, directory: string, token: string, overwrite = false) {
   const response = await fetch(apiURL(`/api/jobs/${jobID}/export-folder`), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(token),
     body: JSON.stringify({ directory, overwrite }),
   });
   return parseResponse<FolderExportResult>(response);
@@ -173,10 +238,42 @@ export async function fetchAdminAPIKeys(token: string, userID = "") {
   return parseResponse<{ api_keys: AdminAPIKey[] }>(response);
 }
 
+export async function fetchAdminUsage(token: string, userID = "") {
+  const query = userID ? `?user_id=${encodeURIComponent(userID)}` : "";
+  const response = await fetch(apiURL(`/api/admin/usage${query}`), {
+    headers: adminHeaders(token),
+    cache: "no-store",
+  });
+  return parseResponse<{ usage: AdminUsage[] }>(response);
+}
+
+export async function fetchAdminJobs(token: string, userID = "", limit = 100) {
+  const params = new URLSearchParams();
+  if (userID) {
+    params.set("user_id", userID);
+  }
+  params.set("limit", String(limit));
+  const response = await fetch(apiURL(`/api/admin/jobs?${params.toString()}`), {
+    headers: adminHeaders(token),
+    cache: "no-store",
+  });
+  return parseResponse<{ jobs: TranslationJob[] }>(response);
+}
+
 function adminHeaders(token: string) {
+  return authHeaders(token);
+}
+
+function authHeaders(token: string) {
+  return {
+    ...bearerHeaders(token),
+    "Content-Type": "application/json",
+  };
+}
+
+function bearerHeaders(token: string) {
   return {
     Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
   };
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,13 @@ type TranslationEntry struct {
 	Box            map[string]int `json:"box"`
 }
 
+type ManualRegion struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
 func NewAIClient(baseURL string) *AIClient {
 	return &AIClient{
 		BaseURL: baseURL,
@@ -45,7 +53,7 @@ func NewAIClient(baseURL string) *AIClient {
 	}
 }
 
-func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage, targetLanguage string) (*AITranslationResponse, error) {
+func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage, targetLanguage, inpaintEngine string, manualRegions []ManualRegion) (*AITranslationResponse, error) {
 	file, err := os.Open(imagePath)
 	if err != nil {
 		return nil, err
@@ -63,6 +71,16 @@ func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage
 	}
 	_ = writer.WriteField("source_language", sourceLanguage)
 	_ = writer.WriteField("target_language", targetLanguage)
+	if strings.TrimSpace(inpaintEngine) != "" {
+		_ = writer.WriteField("inpaint_engine", inpaintEngine)
+	}
+	if len(manualRegions) > 0 {
+		rawRegions, err := json.Marshal(manualRegions)
+		if err != nil {
+			return nil, err
+		}
+		_ = writer.WriteField("manual_regions", string(rawRegions))
+	}
 	if err := writer.Close(); err != nil {
 		return nil, err
 	}

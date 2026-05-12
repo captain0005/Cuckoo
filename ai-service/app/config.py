@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     ocr_min_confidence: float = Field(default=0.55, ge=0, le=1)
     paddle_text_detection_model: str = "PP-OCRv5_mobile_det"
     paddle_text_recognition_model: str = "PP-OCRv5_mobile_rec"
+    inpaint_engine: str = "lama"
+    lama_model_path: str = ""
+    lama_device: str = "auto"
 
     @property
     def uploads_dir(self) -> Path:

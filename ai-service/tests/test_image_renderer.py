@@ -60,6 +60,27 @@ class ImageRendererTest(unittest.TestCase):
         self.assertEqual(layouts[0].align, "left")
         self.assertGreater(layouts[0].box[2], 520)
 
+    def test_product_parameter_title_has_capped_display_size(self):
+        image = Image.new("RGB", (790, 1321), "white")
+        region = TextRegion(
+            text="\u4ea7\u54c1\u53c2\u6570",
+            confidence=0.99,
+            x=41,
+            y=43,
+            width=269,
+            height=78,
+            polygon=[(41, 43), (310, 43), (310, 121), (41, 121)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Product Parameters")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "title")
+        self.assertLessEqual(getattr(layouts[0].font, "size", 0), 56)
+
     def test_middle_micro_text_is_skipped(self):
         image = Image.new("RGB", (790, 1340), "white")
         region = TextRegion(
@@ -98,6 +119,38 @@ class ImageRendererTest(unittest.TestCase):
 
         self.assertEqual(len(layouts), 1)
         self.assertEqual(layouts[0].role, "table_key")
+
+    def test_table_value_uses_cell_width_for_long_translation(self):
+        image = Image.new("RGB", (790, 1321), (245, 247, 250))
+        draw = ImageDraw.Draw(image)
+        for y in (150, 217, 270, 324, 376):
+            draw.line((45, y, 757, y), fill=(70, 74, 80), width=1)
+        draw.line((45, 150, 45, 642), fill=(70, 74, 80), width=1)
+        draw.line((253, 150, 253, 642), fill=(70, 74, 80), width=1)
+        draw.line((757, 150, 757, 642), fill=(70, 74, 80), width=1)
+        region = TextRegion(
+            text="\u80cc\u5149\u4eae\u5ea6\u53ef\u8c03",
+            confidence=0.99,
+            x=440,
+            y=339,
+            width=121,
+            height=24,
+            polygon=[(440, 339), (561, 339), (561, 363), (440, 363)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Backlight brightness is adjustable.")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "table_value")
+        self.assertGreater(layouts[0].box[2], 360)
+        self.assertEqual(layouts[0].lines, ["Backlight brightness is adjustable."])
+        self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 18)
+        _, erase_y, _, erase_height = _erase_box(region, image.size, layouts[0].role)
+        self.assertGreater(erase_y, 324)
+        self.assertLess(erase_y + erase_height, 376)
 
     def test_label_layout_uses_badge_width_to_keep_words_intact(self):
         image = Image.new("RGB", (790, 1340), "white")
@@ -222,6 +275,134 @@ class ImageRendererTest(unittest.TestCase):
         self.assertEqual(layouts[0].align, "left")
         self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 24)
 
+    def test_centered_top_heading_keeps_center_alignment_and_scale(self):
+        image = Image.new("RGB", (800, 800), "white")
+        region = TextRegion(
+            text="USB\u8f93\u51fa",
+            confidence=0.99,
+            x=252,
+            y=51,
+            width=292,
+            height=56,
+            polygon=[(252, 51), (544, 51), (544, 107), (252, 107)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="USB output")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "center_title")
+        self.assertEqual(layouts[0].align, "center")
+        self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 34)
+
+    def test_blue_feature_bar_keeps_icon_area_and_uses_white_text(self):
+        image = Image.new("RGB", (800, 800), "white")
+        ImageDraw.Draw(image).polygon([(25, 528), (270, 528), (260, 575), (15, 575)], fill=(0, 66, 245))
+        region = TextRegion(
+            text="\u53ef\u710a\u954d\u3001\u94c1\u3001\u94a2",
+            confidence=0.99,
+            x=90,
+            y=538,
+            width=160,
+            height=28,
+            polygon=[(90, 538), (250, 538), (250, 566), (90, 566)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Weldable nickel, iron, and steel")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "feature_bar")
+        self.assertGreaterEqual(layouts[0].box[0], region.x)
+        self.assertEqual(layouts[0].color, (255, 255, 255))
+        self.assertLessEqual(len(layouts[0].lines), 2)
+
+    def test_colored_tag_stays_on_tag_background(self):
+        image = Image.new("RGB", (800, 800), "white")
+        ImageDraw.Draw(image).rounded_rectangle((30, 278, 260, 316), radius=6, fill=(245, 171, 24))
+        region = TextRegion(
+            text="\u70b9\u710a\u673a+\u5145\u7535\u5b9d\u4e8c\u5408",
+            confidence=0.99,
+            x=35,
+            y=282,
+            width=220,
+            height=27,
+            polygon=[(35, 282), (255, 282), (255, 309), (35, 309)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Spot welder + power bank 2-in-1")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "tag")
+        self.assertEqual(layouts[0].align, "center")
+        self.assertLessEqual(len(layouts[0].lines), 2)
+
+    def test_single_character_icon_badge_is_skipped(self):
+        image = Image.new("RGB", (800, 800), "white")
+        region = TextRegion(
+            text="\u9001",
+            confidence=0.99,
+            x=10,
+            y=340,
+            width=43,
+            height=41,
+            polygon=[(10, 340), (53, 340), (53, 381), (10, 381)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Free gift")],
+        )
+
+        self.assertEqual(layouts, [])
+
+    def test_large_bottom_decorative_badge_text_is_skipped(self):
+        image = Image.new("RGB", (800, 800), "white")
+        region = TextRegion(
+            text="\u5de5\u5382",
+            confidence=0.99,
+            x=680,
+            y=659,
+            width=101,
+            height=59,
+            polygon=[(680, 659), (781, 659), (781, 718), (680, 718)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Factory")],
+        )
+
+        self.assertEqual(layouts, [])
+
+    def test_forced_manual_badge_text_is_rendered(self):
+        image = Image.new("RGB", (800, 800), "white")
+        region = TextRegion(
+            text="\u5de5\u5382\u76f4\u9500",
+            confidence=0.99,
+            x=620,
+            y=650,
+            width=150,
+            height=96,
+            polygon=[(620, 650), (770, 650), (770, 746), (620, 746)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Factory Direct", force=True)],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "manual")
+        self.assertEqual(layouts[0].align, "center")
+
     def test_body_layouts_are_repositioned_to_avoid_collisions(self):
         image = Image.new("RGB", (640, 900), "white")
         screen_region = TextRegion(
@@ -304,6 +485,28 @@ class ImageRendererTest(unittest.TestCase):
         self.assertTrue(all(layout.role == "label" for layout in layouts))
         self.assertTrue(all(layout.box[1] >= 1230 for layout in layouts))
         self.assert_layouts_do_not_overlap(layouts)
+
+    def test_long_bottom_caption_prefers_readable_wrapping(self):
+        image = Image.new("RGB", (790, 1393), "white")
+        region = TextRegion(
+            "Type-C\u5145\u7535\u7ebf",
+            0.99,
+            267,
+            1253,
+            160,
+            36,
+            [(267, 1253), (427, 1253), (427, 1289), (267, 1289)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Type-C charging cable")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "label")
+        self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 18)
+        self.assertLessEqual(len(layouts[0].lines), 2)
 
     def test_tiny_bottom_product_marking_is_skipped(self):
         image = Image.new("RGB", (790, 1393), "white")

@@ -25,7 +25,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend-builder /out/server /app/server
 COPY ai-service/requirements.txt /tmp/ai-requirements.txt
-RUN pip install --no-cache-dir -r /tmp/ai-requirements.txt
+COPY ai-service/requirements-lama.txt /tmp/ai-requirements-lama.txt
+RUN pip install --no-cache-dir -r /tmp/ai-requirements.txt -r /tmp/ai-requirements-lama.txt
 COPY ai-service /app/ai-service
 COPY scripts/start-railway.sh /app/start-railway.sh
 

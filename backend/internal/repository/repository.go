@@ -71,10 +71,23 @@ func (r *Repository) CreateJob(job *models.Job) error {
 
 func (r *Repository) GetJob(jobID string) (*models.Job, error) {
 	var job models.Job
-	if err := r.db.Preload("Results").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := r.db.Preload("User").Preload("Results").First(&job, "id = ?", jobID).Error; err != nil {
 		return nil, err
 	}
 	return &job, nil
+}
+
+func (r *Repository) ListJobs(userID string, limit int) ([]models.Job, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	query := r.db.Preload("User").Preload("Results").Order("created_at desc").Limit(limit)
+	if strings.TrimSpace(userID) != "" {
+		query = query.Where("user_id = ?", strings.TrimSpace(userID))
+	}
+	var jobs []models.Job
+	err := query.Find(&jobs).Error
+	return jobs, err
 }
 
 func (r *Repository) SetJobStatus(jobID, status, errorMessage string) error {
@@ -85,13 +98,19 @@ func (r *Repository) SetJobStatus(jobID, status, errorMessage string) error {
 	return r.db.Model(&models.Job{}).Where("id = ?", jobID).Updates(updates).Error
 }
 
-func (r *Repository) AddResult(jobID string, result models.JobResult) error {
+func (r *Repository) AddResult(jobID string, result models.JobResult, sourceCharacters, translatedCharacters int) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&result).Error; err != nil {
 			return err
 		}
 		return tx.Model(&models.Job{}).Where("id = ?", jobID).
-			UpdateColumn("completed", gorm.Expr("completed + ?", 1)).Error
+			Updates(map[string]any{
+				"completed":             gorm.Expr("completed + ?", 1),
+				"regions_detected":      gorm.Expr("regions_detected + ?", result.RegionsDetected),
+				"regions_replaced":      gorm.Expr("regions_replaced + ?", result.RegionsReplaced),
+				"source_characters":     gorm.Expr("source_characters + ?", sourceCharacters),
+				"translated_characters": gorm.Expr("translated_characters + ?", translatedCharacters),
+			}).Error
 	})
 }
 
@@ -194,6 +213,67 @@ func (r *Repository) ListUsers() ([]models.User, error) {
 	var users []models.User
 	err := r.db.Order("created_at asc").Find(&users).Error
 	return users, err
+}
+
+func (r *Repository) ListUserUsage(userID string) ([]models.UserUsageResponse, error) {
+	userID = strings.TrimSpace(userID)
+	query := r.db.Table("users").
+		Select(`
+			users.id AS user_id,
+			users.username,
+			users.display_name,
+			users.role,
+			users.status,
+			COUNT(jobs.id) AS jobs,
+			COALESCE(SUM(jobs.total), 0) AS images,
+			COALESCE(SUM(jobs.completed), 0) AS completed_images,
+			COALESCE(SUM(jobs.regions_detected), 0) AS regions_detected,
+			COALESCE(SUM(jobs.regions_replaced), 0) AS regions_replaced,
+			COALESCE(SUM(jobs.source_characters), 0) AS source_characters,
+			COALESCE(SUM(jobs.translated_characters), 0) AS translated_characters,
+			MAX(jobs.updated_at) AS last_job_at`).
+		Joins("LEFT JOIN jobs ON jobs.user_id = users.id").
+		Group("users.id, users.username, users.display_name, users.role, users.status").
+		Order("users.created_at asc")
+	if userID != "" {
+		query = query.Where("users.id = ?", userID)
+	}
+	var items []models.UserUsageResponse
+	if err := query.Scan(&items).Error; err != nil {
+		return nil, err
+	}
+	if userID != "" {
+		return items, nil
+	}
+
+	var unassigned models.UserUsageResponse
+	if err := r.db.Table("jobs").
+		Select(`
+			'' AS user_id,
+			'未归属' AS username,
+			'未归属任务' AS display_name,
+			'legacy' AS role,
+			'active' AS status,
+			COUNT(id) AS jobs,
+			COALESCE(SUM(total), 0) AS images,
+			COALESCE(SUM(completed), 0) AS completed_images,
+			COALESCE(SUM(regions_detected), 0) AS regions_detected,
+			COALESCE(SUM(regions_replaced), 0) AS regions_replaced,
+			COALESCE(SUM(source_characters), 0) AS source_characters,
+			COALESCE(SUM(translated_characters), 0) AS translated_characters`).
+		Where("user_id = '' OR user_id IS NULL").
+		Scan(&unassigned).Error; err != nil {
+		return nil, err
+	}
+	if unassigned.Jobs > 0 {
+		var lastJob models.Job
+		if err := r.db.Where("user_id = '' OR user_id IS NULL").Order("updated_at desc").First(&lastJob).Error; err == nil {
+			lastJobAt := lastJob.UpdatedAt
+			unassigned.LastJobAt = &lastJobAt
+		}
+		items = append(items, unassigned)
+	}
+	return items, nil
 }
 
 func (r *Repository) CreateUser(user *models.User) error {

@@ -17,10 +17,16 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	h := handlers.New(cfg, repo)
 	r.GET("/", h.Health)
 	r.GET("/health", h.Health)
-	r.POST("/api/jobs", h.CreateJob)
-	r.GET("/api/jobs/:jobID", h.GetJob)
-	r.GET("/api/jobs/:jobID/download", h.DownloadJob)
-	r.POST("/api/jobs/:jobID/export-folder", h.ExportJobToFolder)
+
+	r.POST("/api/auth/login", h.UserLogin)
+	auth := r.Group("/api")
+	auth.Use(h.RequireUser())
+	auth.GET("/me", h.CurrentUser)
+	auth.GET("/jobs", h.ListJobs)
+	auth.POST("/jobs", h.CreateJob)
+	auth.GET("/jobs/:jobID", h.GetJob)
+	auth.GET("/jobs/:jobID/download", h.DownloadJob)
+	auth.POST("/jobs/:jobID/export-folder", h.ExportJobToFolder)
 
 	r.POST("/api/admin/login", h.AdminLogin)
 	admin := r.Group("/api/admin")
@@ -30,6 +36,8 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	admin.PUT("/users/:userID", h.UpdateAdminUser)
 	admin.DELETE("/users/:userID", h.DeleteAdminUser)
 	admin.GET("/api-keys", h.ListAdminAPIKeys)
+	admin.GET("/usage", h.ListAdminUsage)
+	admin.GET("/jobs", h.ListAdminJobs)
 
 	r.Static("/files", cfg.DataDir+"/outputs")
 	return r

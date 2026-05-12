@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"mime/multipart"
 	"net/http"
@@ -32,21 +33,7 @@ type uploadedImage struct {
 	InputPath      string
 	OutputPath     string
 	OutputFilename string
-}
-
-type jobResponse struct {
-	JobID          string                     `json:"job_id"`
-	Status         string                     `json:"status"`
-	Progress       float64                    `json:"progress"`
-	Completed      int                        `json:"completed"`
-	Total          int                        `json:"total"`
-	SourceLanguage string                     `json:"source_language"`
-	TargetLanguage string                     `json:"target_language"`
-	Error          string                     `json:"error"`
-	CreatedAt      time.Time                  `json:"created_at"`
-	UpdatedAt      time.Time                  `json:"updated_at"`
-	DownloadURL    *string                    `json:"download_url"`
-	Results        []models.JobResultResponse `json:"results"`
+	ManualRegions  []services.ManualRegion
 }
 
 type exportFolderRequest struct {
@@ -77,6 +64,12 @@ func (h *Handler) Health(c *gin.Context) {
 }
 
 func (h *Handler) CreateJob(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+		return
+	}
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "multipart form is required"})
@@ -94,9 +87,15 @@ func (h *Handler) CreateJob(c *gin.Context) {
 
 	sourceLanguage := firstFormValue(form.Value, "source_language", "zh")
 	targetLanguage := firstFormValue(form.Value, "target_language", "en")
+	inpaintEngine := firstFormValue(form.Value, "inpaint_engine", "lama")
+	manualRegions, err := parseManualRegionsPayload(firstFormValue(form.Value, "manual_regions", ""))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
 	jobID := uuid.NewString()
 
-	uploads, err := h.saveUploads(c, jobID, files)
+	uploads, err := h.saveUploads(c, jobID, files, manualRegions)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
@@ -104,6 +103,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 
 	job := &models.Job{
 		ID:             jobID,
+		UserID:         user.ID,
 		Status:         models.StatusQueued,
 		SourceLanguage: sourceLanguage,
 		TargetLanguage: targetLanguage,
@@ -115,8 +115,27 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		return
 	}
 
-	go h.processJob(context.Background(), jobID, sourceLanguage, targetLanguage, uploads)
+	go h.processJob(context.Background(), jobID, sourceLanguage, targetLanguage, inpaintEngine, uploads)
+	job.User = *user
 	c.JSON(http.StatusAccepted, h.toJobResponse(job))
+}
+
+func (h *Handler) ListJobs(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+		return
+	}
+	jobs, err := h.repo.ListJobs(user.ID, queryInt(c, "limit", 50))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	items := make([]models.JobResponse, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, h.toJobResponse(&job))
+	}
+	c.JSON(http.StatusOK, gin.H{"jobs": items})
 }
 
 func (h *Handler) GetJob(c *gin.Context) {
@@ -129,6 +148,10 @@ func (h *Handler) GetJob(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
+		return
+	}
 	c.JSON(http.StatusOK, h.toJobResponse(job))
 }
 
@@ -137,6 +160,10 @@ func (h *Handler) DownloadJob(c *gin.Context) {
 	job, err := h.repo.GetJob(jobID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
+		return
+	}
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
 		return
 	}
 	if job.Status != models.StatusCompleted {
@@ -157,6 +184,10 @@ func (h *Handler) ExportJobToFolder(c *gin.Context) {
 	job, err := h.repo.GetJob(jobID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
+		return
+	}
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
 		return
 	}
 	if job.Status != models.StatusCompleted {
@@ -192,7 +223,7 @@ func (h *Handler) ExportJobToFolder(c *gin.Context) {
 	})
 }
 
-func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.FileHeader) ([]uploadedImage, error) {
+func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.FileHeader, manualRegions [][]services.ManualRegion) ([]uploadedImage, error) {
 	uploadDir := h.cfg.UploadDir(jobID)
 	outputDir := h.cfg.OutputDir(jobID)
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
@@ -220,23 +251,28 @@ func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.F
 			return nil, err
 		}
 		outputFilename := outputName(filename)
+		var regions []services.ManualRegion
+		if index < len(manualRegions) {
+			regions = manualRegions[index]
+		}
 		uploads = append(uploads, uploadedImage{
 			SourceFilename: filename,
 			InputPath:      inputPath,
 			OutputPath:     filepath.Join(outputDir, outputFilename),
 			OutputFilename: outputFilename,
+			ManualRegions:  regions,
 		})
 	}
 	return uploads, nil
 }
 
-func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetLanguage string, uploads []uploadedImage) {
+func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetLanguage, inpaintEngine string, uploads []uploadedImage) {
 	if err := h.repo.SetJobStatus(jobID, models.StatusProcessing, ""); err != nil {
 		return
 	}
 
 	for _, upload := range uploads {
-		result, err := h.aiClient.TranslateImage(ctx, upload.InputPath, sourceLanguage, targetLanguage)
+		result, err := h.aiClient.TranslateImage(ctx, upload.InputPath, sourceLanguage, targetLanguage, inpaintEngine, upload.ManualRegions)
 		if err != nil {
 			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
 			return
@@ -270,7 +306,8 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 			EntriesJSON:     models.EncodeJSON(entries),
 			WarningsJSON:    models.EncodeJSON(result.Warnings),
 		}
-		if err := h.repo.AddResult(jobID, dbResult); err != nil {
+		sourceCharacters, translatedCharacters := countEntryCharacters(entries)
+		if err := h.repo.AddResult(jobID, dbResult, sourceCharacters, translatedCharacters); err != nil {
 			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
 			return
 		}
@@ -278,36 +315,26 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 	_ = h.repo.CompleteJob(jobID)
 }
 
-func (h *Handler) toJobResponse(job *models.Job) jobResponse {
-	progress := 0.0
-	if job.Total > 0 {
-		progress = float64(job.Completed) / float64(job.Total) * 100
-	}
-	var downloadURL *string
-	if job.Status == models.StatusCompleted {
-		value := "/api/jobs/" + job.ID + "/download"
-		downloadURL = &value
-	}
+func (h *Handler) toJobResponse(job *models.Job) models.JobResponse {
+	return job.ToResponse(h.cfg.PublicFileURL)
+}
 
-	results := make([]models.JobResultResponse, 0, len(job.Results))
-	for _, result := range job.Results {
-		results = append(results, result.ToResponse(h.cfg.PublicFileURL(job.ID, result.OutputFilename)))
+func (h *Handler) canAccessJob(c *gin.Context, job *models.Job) bool {
+	user, ok := currentUser(c)
+	if !ok {
+		return false
 	}
+	return job.UserID == user.ID || isAdminRole(user.Role)
+}
 
-	return jobResponse{
-		JobID:          job.ID,
-		Status:         job.Status,
-		Progress:       progress,
-		Completed:      job.Completed,
-		Total:          job.Total,
-		SourceLanguage: job.SourceLanguage,
-		TargetLanguage: job.TargetLanguage,
-		Error:          job.ErrorMessage,
-		CreatedAt:      job.CreatedAt,
-		UpdatedAt:      job.UpdatedAt,
-		DownloadURL:    downloadURL,
-		Results:        results,
+func countEntryCharacters(entries []models.TranslationEntry) (int, int) {
+	source := 0
+	translated := 0
+	for _, entry := range entries {
+		source += len([]rune(entry.SourceText))
+		translated += len([]rune(entry.TranslatedText))
 	}
+	return source, translated
 }
 
 func firstFormValue(values map[string][]string, key, fallback string) string {
@@ -316,6 +343,52 @@ func firstFormValue(values map[string][]string, key, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(items[0])
+}
+
+func parseManualRegionsPayload(raw string) ([][]services.ManualRegion, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	var payload [][]services.ManualRegion
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return nil, errors.New("invalid manual_regions payload")
+	}
+	for fileIndex := range payload {
+		regions := payload[fileIndex]
+		cleaned := regions[:0]
+		for _, region := range regions {
+			if region.Width <= 0 || region.Height <= 0 {
+				continue
+			}
+			region.X = clamp01(region.X)
+			region.Y = clamp01(region.Y)
+			region.Width = clamp01(region.Width)
+			region.Height = clamp01(region.Height)
+			if region.X+region.Width > 1 {
+				region.Width = 1 - region.X
+			}
+			if region.Y+region.Height > 1 {
+				region.Height = 1 - region.Y
+			}
+			if region.Width <= 0 || region.Height <= 0 {
+				continue
+			}
+			cleaned = append(cleaned, region)
+		}
+		payload[fileIndex] = cleaned
+	}
+	return payload, nil
+}
+
+func clamp01(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)

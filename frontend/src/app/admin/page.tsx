@@ -6,11 +6,15 @@ import {
   createAdminUser,
   deleteAdminUser,
   fetchAdminAPIKeys,
+  fetchAdminJobs,
+  fetchAdminUsage,
   fetchAdminUsers,
   updateAdminUser,
   type AdminAPIKey,
+  type AdminUsage,
   type AdminUser,
   type AdminUserPayload,
+  type TranslationJob,
 } from "@/lib/api";
 
 const EMPTY_USER: AdminUserPayload = {
@@ -40,6 +44,8 @@ export default function AdminPage() {
   const [password, setPassword] = useState("");
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [apiKeys, setAPIKeys] = useState<AdminAPIKey[]>([]);
+  const [usage, setUsage] = useState<AdminUsage[]>([]);
+  const [jobs, setJobs] = useState<TranslationJob[]>([]);
   const [selectedUserID, setSelectedUserID] = useState("");
   const [editingID, setEditingID] = useState<string | null>(null);
   const [form, setForm] = useState<AdminUserPayload>(EMPTY_USER);
@@ -50,10 +56,15 @@ export default function AdminPage() {
     return {
       users: users.length,
       active: users.filter((item) => item.status === "active").length,
-      keys: apiKeys.length,
-      requests: apiKeys.reduce((sum, item) => sum + Number(item.total_requests || 0), 0),
+      jobs: usage.reduce((sum, item) => sum + Number(item.jobs || 0), 0),
+      images: usage.reduce((sum, item) => sum + Number(item.images || 0), 0),
+      characters: usage.reduce((sum, item) => sum + Number(item.source_characters || 0), 0),
     };
-  }, [users, apiKeys]);
+  }, [users, usage]);
+
+  const usageByUser = useMemo(() => {
+    return new Map(usage.map((item) => [item.user_id, item]));
+  }, [usage]);
 
   useEffect(() => {
     const savedToken = window.localStorage.getItem("cuckoo_admin_token") || "";
@@ -89,24 +100,32 @@ export default function AdminPage() {
     if (!nextToken) {
       return;
     }
-    const [userPayload, keyPayload] = await Promise.all([
+    const [userPayload, keyPayload, usagePayload, jobsPayload] = await Promise.all([
       fetchAdminUsers(nextToken),
       fetchAdminAPIKeys(nextToken, userID),
+      fetchAdminUsage(nextToken),
+      fetchAdminJobs(nextToken, userID),
     ]);
     setUsers(userPayload.users);
     setAPIKeys(keyPayload.api_keys);
+    setUsage(usagePayload.usage);
+    setJobs(jobsPayload.jobs);
   }
 
-  async function refreshAPIKeys(userID: string) {
+  async function refreshUserFilter(userID: string) {
     setSelectedUserID(userID);
     if (!token) {
       return;
     }
     try {
-      const payload = await fetchAdminAPIKeys(token, userID);
-      setAPIKeys(payload.api_keys);
+      const [keyPayload, jobsPayload] = await Promise.all([
+        fetchAdminAPIKeys(token, userID),
+        fetchAdminJobs(token, userID),
+      ]);
+      setAPIKeys(keyPayload.api_keys);
+      setJobs(jobsPayload.jobs);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "读取 API Key 失败");
+      setMessage(error instanceof Error ? error.message : "读取用户数据失败");
     }
   }
 
@@ -175,6 +194,8 @@ export default function AdminPage() {
     setCurrentUser(null);
     setUsers([]);
     setAPIKeys([]);
+    setUsage([]);
+    setJobs([]);
     setMessage("已退出后台。");
   }
 
@@ -224,8 +245,9 @@ export default function AdminPage() {
       <section className="admin-stats">
         <StatCard label="用户总数" value={stats.users} />
         <StatCard label="启用用户" value={stats.active} />
-        <StatCard label="API Key" value={stats.keys} />
-        <StatCard label="调用次数" value={stats.requests} />
+        <StatCard label="任务总数" value={stats.jobs} />
+        <StatCard label="图片总数" value={stats.images} />
+        <StatCard label="源文字符" value={stats.characters} />
       </section>
 
       <section className="admin-grid">
@@ -247,35 +269,46 @@ export default function AdminPage() {
                   <th>名称</th>
                   <th>角色</th>
                   <th>状态</th>
+                  <th>任务</th>
+                  <th>图片</th>
+                  <th>字符</th>
+                  <th>最近任务</th>
                   <th>最近登录</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {users.map((user) => (
-                  <tr key={user.id}>
-                    <td>
-                      <strong>{user.username}</strong>
-                      <span>{user.email}</span>
-                    </td>
-                    <td>{user.display_name}</td>
-                    <td>{ROLE_LABELS[user.role] || user.role}</td>
-                    <td>
-                      <span className={`admin-pill ${user.status}`}>{STATUS_LABELS[user.status] || user.status}</span>
-                    </td>
-                    <td>{formatTime(user.last_login_at)}</td>
-                    <td>
-                      <div className="admin-actions">
-                        <button type="button" onClick={() => editUser(user)}>
-                          编辑
-                        </button>
-                        <button type="button" className="danger-button" onClick={() => void removeUser(user)}>
-                          删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {users.map((user) => {
+                  const itemUsage = usageByUser.get(user.id);
+                  return (
+                    <tr key={user.id}>
+                      <td>
+                        <strong>{user.username}</strong>
+                        <span>{user.email}</span>
+                      </td>
+                      <td>{user.display_name}</td>
+                      <td>{ROLE_LABELS[user.role] || user.role}</td>
+                      <td>
+                        <span className={`admin-pill ${user.status}`}>{STATUS_LABELS[user.status] || user.status}</span>
+                      </td>
+                      <td>{itemUsage?.jobs || 0}</td>
+                      <td>{itemUsage?.images || 0}</td>
+                      <td>{itemUsage?.source_characters || 0}</td>
+                      <td>{formatTime(itemUsage?.last_job_at || null)}</td>
+                      <td>{formatTime(user.last_login_at)}</td>
+                      <td>
+                        <div className="admin-actions">
+                          <button type="button" onClick={() => editUser(user)}>
+                            编辑
+                          </button>
+                          <button type="button" className="danger-button" onClick={() => void removeUser(user)}>
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -346,12 +379,76 @@ export default function AdminPage() {
       <section className="admin-panel">
         <div className="admin-panel-head">
           <div>
+            <p className="eyebrow">Jobs</p>
+            <h2>用户任务记录</h2>
+          </div>
+          <label className="admin-filter">
+            用户
+            <select value={selectedUserID} onChange={(event) => void refreshUserFilter(event.target.value)}>
+              <option value="">全部用户</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.username}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>用户</th>
+                <th>状态</th>
+                <th>图片</th>
+                <th>识别/替换</th>
+                <th>字符</th>
+                <th>语言</th>
+                <th>创建时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((job) => (
+                <tr key={job.job_id}>
+                  <td>
+                    <strong>{job.job_id.slice(0, 8)}</strong>
+                    <span>{job.error || "运行正常"}</span>
+                  </td>
+                  <td>{job.username || job.user_id || "未归属"}</td>
+                  <td>{STATUS_LABELS[job.status] || job.status}</td>
+                  <td>
+                    {job.completed}/{job.total}
+                  </td>
+                  <td>
+                    {job.regions_detected}/{job.regions_replaced}
+                  </td>
+                  <td>{job.source_characters}</td>
+                  <td>
+                    {job.source_language} → {job.target_language}
+                  </td>
+                  <td>{formatTime(job.created_at)}</td>
+                </tr>
+              ))}
+              {!jobs.length ? (
+                <tr>
+                  <td colSpan={8}>暂无任务数据</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="admin-panel">
+        <div className="admin-panel-head">
+          <div>
             <p className="eyebrow">API Keys</p>
             <h2>用户 API Key 数据</h2>
           </div>
           <label className="admin-filter">
             用户
-            <select value={selectedUserID} onChange={(event) => void refreshAPIKeys(event.target.value)}>
+            <select value={selectedUserID} onChange={(event) => void refreshUserFilter(event.target.value)}>
               <option value="">全部用户</option>
               {users.map((user) => (
                 <option key={user.id} value={user.id}>
