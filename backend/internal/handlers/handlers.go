@@ -56,12 +56,15 @@ func New(cfg config.Config, repo *repository.Repository) *Handler {
 }
 
 func (h *Handler) Health(c *gin.Context) {
-	aiStatus, aiDetail := h.aiHealth()
+	aiStatus, aiDetail, aiPayload := h.aiHealth()
 	payload := gin.H{
 		"status":     "ok",
 		"service":    "backend",
 		"ai_service": h.cfg.AIServiceURL,
 		"ai_status":  aiStatus,
+	}
+	if len(aiPayload) > 0 {
+		payload["ai"] = aiPayload
 	}
 	if aiDetail != "" {
 		payload["ai_error"] = aiDetail
@@ -69,23 +72,27 @@ func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, payload)
 }
 
-func (h *Handler) aiHealth() (string, string) {
+func (h *Handler) aiHealth() (string, string, map[string]any) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.cfg.AIServiceURL+"/health", nil)
 	if err != nil {
-		return "invalid", err.Error()
+		return "invalid", err.Error(), nil
 	}
 	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
 	if err != nil {
-		return "unreachable", err.Error()
+		return "unreachable", err.Error(), nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "unhealthy", resp.Status
+		return "unhealthy", resp.Status, nil
 	}
-	return "ok", ""
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "ok", "ai health payload was not valid JSON", nil
+	}
+	return "ok", "", payload
 }
 
 func (h *Handler) CreateJob(c *gin.Context) {
