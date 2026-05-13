@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from app.image_renderer import TextReplacement, render_replacements
-from app.ocr import OcrRecognizer, TextRegion, build_ocr_recognizer
+from app.ocr import OcrRecognizer, TextRegion, build_ocr_recognizer, release_ocr_resources
 from app.text_utils import is_translatable_ocr_text
 from app.translation import Translator, build_translator
 
@@ -105,6 +105,8 @@ class ImageTranslationPipeline:
             output_path.write_bytes(input_path.read_bytes())
         else:
             candidate_count = len(replacements)
+            if _uses_lama_inpainting(inpaint_engine):
+                release_ocr_resources()
             replacements = render_replacements(
                 source_path=input_path,
                 output_path=output_path,
@@ -234,6 +236,11 @@ def _translate_texts(translator: Translator, texts: list[str], source_language: 
         return translated_lines
 
     return [translator.translate(text, source_language, target_language) for text in texts]
+
+
+def _uses_lama_inpainting(inpaint_engine: str | None) -> bool:
+    engine = (inpaint_engine or "lama").strip().lower()
+    return engine in {"", "auto", "lama"}
 
 
 def _should_split_manual_group(regions: list[TextRegion], manual_box: tuple[int, int, int, int]) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -178,6 +179,11 @@ def build_ocr_recognizer() -> OcrRecognizer:
     if engine != "paddle":
         raise RuntimeError(f"unsupported OCR_ENGINE: {settings.ocr_engine}")
     return PaddleOcrImageRecognizer()
+
+
+def release_ocr_resources() -> None:
+    PaddleOcrImageRecognizer._shared_ocr_instances.clear()
+    gc.collect()
 
 
 def _first_present(payload: dict[str, Any], *keys: str) -> Any:

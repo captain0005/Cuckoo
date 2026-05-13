@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from functools import lru_cache
+import gc
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,10 @@ def inpaint_with_lama(image: Image.Image, mask: np.ndarray) -> Image.Image:
     arr = repaired[0].permute(1, 2, 0).detach().cpu().numpy()
     arr = np.clip(arr * 255, 0, 255).astype("uint8")
     arr = arr[:original_height, :original_width]
-    return Image.fromarray(arr, mode="RGB")
+    result = Image.fromarray(arr, mode="RGB")
+    del model, image_tensor, mask_tensor, repaired
+    gc.collect()
+    return result
 
 
 def resolve_lama_model_path() -> Path:
@@ -69,7 +72,6 @@ def _import_torch() -> Any:
     return torch
 
 
-@lru_cache(maxsize=1)
 def _load_lama_model(torch: Any) -> tuple[Any, Any]:
     device_name = settings.lama_device.strip().lower()
     if device_name in {"", "auto"}:
