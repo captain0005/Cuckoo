@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import patch
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from app.image_renderer import (
@@ -7,6 +9,7 @@ from app.image_renderer import (
     _erase_box,
     _estimate_text_color,
     _fit_text,
+    _inpaint_masked_area_with_lama,
     _plan_text_layouts,
     _text_content_bounds,
 )
@@ -563,6 +566,24 @@ class ImageRendererTest(unittest.TestCase):
         color = _estimate_text_color(image, region)
 
         self.assertLess(sum(color), 180)
+
+    def test_lama_inpainting_crops_to_mask_bounds(self):
+        image = Image.new("RGB", (1000, 1000), "gray")
+        mask = np.zeros((1000, 1000), dtype=np.uint8)
+        mask[480:520, 100:150] = 255
+        seen = {}
+
+        def fake_inpaint(crop, crop_mask):
+            seen["crop_size"] = crop.size
+            seen["mask_shape"] = crop_mask.shape
+            return Image.new("RGB", crop.size, "white")
+
+        with patch("app.image_renderer.inpaint_with_lama", side_effect=fake_inpaint):
+            result = _inpaint_masked_area_with_lama(image, mask)
+
+        self.assertEqual(result.size, image.size)
+        self.assertLess(seen["crop_size"][0] * seen["crop_size"][1], image.width * image.height)
+        self.assertEqual(seen["mask_shape"], (104, 114))
 
 
 if __name__ == "__main__":

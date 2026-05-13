@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,7 @@ type AIClient struct {
 }
 
 const aiTranslateMaxAttempts = 3
+const defaultAIClientTimeout = 15 * time.Minute
 
 type AITranslationResponse struct {
 	SourceFilename    string             `json:"source_filename"`
@@ -50,7 +52,7 @@ func NewAIClient(baseURL string) *AIClient {
 	return &AIClient{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: aiClientTimeout(),
 		},
 	}
 }
@@ -154,4 +156,16 @@ func isRetryableAIError(err error) bool {
 		strings.Contains(message, "server closed idle connection") ||
 		strings.Contains(message, "broken pipe") ||
 		strings.Contains(message, "use of closed network connection")
+}
+
+func aiClientTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("AI_CLIENT_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return defaultAIClientTimeout
+	}
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil || seconds <= 0 {
+		return defaultAIClientTimeout
+	}
+	return time.Duration(seconds * float64(time.Second))
 }

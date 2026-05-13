@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+from functools import partial
 import json
 import os
 import tempfile
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from app.config import settings
@@ -13,6 +16,7 @@ from app.inpainting import lama_model_available
 from app.pipeline import ImageTranslationPipeline, ManualRegion
 
 app = FastAPI(title=f"{settings.app_name} AI Service", version="0.2.0")
+processing_slots = asyncio.Semaphore(max(1, int(os.getenv("AI_PROCESSING_CONCURRENCY", "1"))))
 
 
 @app.get("/health")
@@ -53,17 +57,20 @@ async def translate_image(
                 handle.write(chunk)
         await file.close()
 
-        pipeline = ImageTranslationPipeline(
-            source_language=source_language,
-            target_language=target_language,
-        )
-        result = pipeline.process_image(
-            input_path=input_path,
-            output_path=output_path,
-            source_filename=file.filename or input_path.name,
-            manual_regions=parsed_manual_regions,
-            inpaint_engine=inpaint_engine,
-        )
+        source_filename = file.filename or input_path.name
+        async with processing_slots:
+            result = await anyio.to_thread.run_sync(
+                partial(
+                    process_translation,
+                    input_path=input_path,
+                    output_path=output_path,
+                    source_filename=source_filename,
+                    source_language=source_language,
+                    target_language=target_language,
+                    manual_regions=parsed_manual_regions,
+                    inpaint_engine=inpaint_engine,
+                )
+            )
 
         encoded_image = base64.b64encode(output_path.read_bytes()).decode("ascii")
         payload = result.to_dict()
@@ -80,6 +87,29 @@ async def translate_image(
                 os.remove(path)
             except FileNotFoundError:
                 pass
+
+
+def process_translation(
+    *,
+    input_path: Path,
+    output_path: Path,
+    source_filename: str,
+    source_language: str,
+    target_language: str,
+    manual_regions: list[ManualRegion],
+    inpaint_engine: str,
+):
+    pipeline = ImageTranslationPipeline(
+        source_language=source_language,
+        target_language=target_language,
+    )
+    return pipeline.process_image(
+        input_path=input_path,
+        output_path=output_path,
+        source_filename=source_filename,
+        manual_regions=manual_regions,
+        inpaint_engine=inpaint_engine,
+    )
 
 
 def parse_manual_regions(raw: str) -> list[ManualRegion]:

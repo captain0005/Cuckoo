@@ -388,7 +388,7 @@ def _inpaint_layouts(
     requested_engine = (engine or "lama").strip().lower()
     if requested_engine in {"lama", "auto"}:
         try:
-            repaired = inpaint_with_lama(image, mask)
+            repaired = _inpaint_masked_area_with_lama(image, mask)
             return _refill_flat_regions(image, repaired, layouts)
         except InpaintUnavailableError as exc:
             if warnings is not None:
@@ -405,6 +405,44 @@ def _inpaint_layouts(
     arr = np.array(image)
     repaired = Image.fromarray(cv2.inpaint(arr, mask, inpaintRadius=2, flags=cv2.INPAINT_TELEA))
     return _refill_flat_regions(image, repaired, layouts)
+
+
+def _inpaint_masked_area_with_lama(image: Image.Image, mask: np.ndarray) -> Image.Image:
+    bounds = _mask_bounds(mask)
+    if bounds is None:
+        return image.copy()
+
+    left, top, right, bottom = bounds
+    width = right - left
+    height = bottom - top
+    padding = max(32, int(max(width, height) * 0.18))
+    crop_box = (
+        max(0, left - padding),
+        max(0, top - padding),
+        min(image.width, right + padding),
+        min(image.height, bottom + padding),
+    )
+
+    crop_width = crop_box[2] - crop_box[0]
+    crop_height = crop_box[3] - crop_box[1]
+    crop_area = crop_width * crop_height
+    image_area = image.width * image.height
+    if crop_area >= image_area * 0.92:
+        return inpaint_with_lama(image, mask)
+
+    crop = image.crop(crop_box)
+    mask_crop = mask[crop_box[1] : crop_box[3], crop_box[0] : crop_box[2]]
+    repaired_crop = inpaint_with_lama(crop, mask_crop)
+    repaired = image.copy()
+    repaired.paste(repaired_crop, crop_box[:2])
+    return repaired
+
+
+def _mask_bounds(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    ys, xs = np.where(mask > 0)
+    if xs.size == 0 or ys.size == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
 def _build_inpaint_mask(image: Image.Image, layouts: list[TextLayout]) -> np.ndarray:
