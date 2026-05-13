@@ -180,6 +180,13 @@ class ImageTranslationPipeline:
             for index, _ in grouped:
                 consumed.add(index)
             selected_regions = [region for _, region in grouped]
+            if _should_split_manual_group(selected_regions, manual_box):
+                for region in _reading_order(selected_regions):
+                    translated_text = self.translator.translate(region.text, self.source_language, self.target_language)
+                    if translated_text.strip():
+                        replacements.append(TextReplacement(region=region, translated_text=translated_text, force=True))
+                continue
+
             source_text = " ".join(region.text.strip() for region in _reading_order(selected_regions) if region.text.strip())
             if not source_text:
                 continue
@@ -201,6 +208,23 @@ class ImageTranslationPipeline:
             replacements.append(TextReplacement(region=combined_region, translated_text=translated_text, force=True))
 
         return replacements
+
+
+def _should_split_manual_group(regions: list[TextRegion], manual_box: tuple[int, int, int, int]) -> bool:
+    if len(regions) < 3:
+        return False
+
+    _, _, box_width, box_height = manual_box
+    if len(regions) >= 6 or box_height > box_width * 1.25:
+        return True
+
+    ordered = _reading_order(regions)
+    heights = sorted(max(1, region.height) for region in ordered)
+    median_height = heights[len(heights) // 2]
+    centers = sorted(region.y + region.height / 2 for region in ordered)
+    gaps = [bottom - top for top, bottom in zip(centers, centers[1:])]
+    row_like_gaps = [gap for gap in gaps if gap > median_height * 0.65]
+    return len(ordered) >= 4 and len(row_like_gaps) >= len(ordered) - 2
 
 
 def _reading_order(regions: list[TextRegion]) -> list[TextRegion]:
