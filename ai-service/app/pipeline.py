@@ -152,8 +152,13 @@ class ImageTranslationPipeline:
             return self._build_manual_replacements(translatable, manual_regions, image_size)
 
         replacements: list[TextReplacement] = []
-        for region in translatable:
-            translated_text = self.translator.translate(region.text, self.source_language, self.target_language)
+        translated_texts = _translate_texts(
+            self.translator,
+            [region.text for region in translatable],
+            self.source_language,
+            self.target_language,
+        )
+        for region, translated_text in zip(translatable, translated_texts):
             if translated_text.strip():
                 replacements.append(TextReplacement(region=region, translated_text=translated_text))
         return replacements
@@ -181,8 +186,14 @@ class ImageTranslationPipeline:
                 consumed.add(index)
             selected_regions = [region for _, region in grouped]
             if _should_split_manual_group(selected_regions, manual_box):
-                for region in _reading_order(selected_regions):
-                    translated_text = self.translator.translate(region.text, self.source_language, self.target_language)
+                ordered_regions = _reading_order(selected_regions)
+                translated_texts = _translate_texts(
+                    self.translator,
+                    [region.text for region in ordered_regions],
+                    self.source_language,
+                    self.target_language,
+                )
+                for region, translated_text in zip(ordered_regions, translated_texts):
                     if translated_text.strip():
                         replacements.append(TextReplacement(region=region, translated_text=translated_text, force=True))
                 continue
@@ -208,6 +219,21 @@ class ImageTranslationPipeline:
             replacements.append(TextReplacement(region=combined_region, translated_text=translated_text, force=True))
 
         return replacements
+
+
+def _translate_texts(translator: Translator, texts: list[str], source_language: str, target_language: str) -> list[str]:
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [translator.translate(texts[0], source_language, target_language)]
+
+    joined_text = "\n".join(texts)
+    translated = translator.translate(joined_text, source_language, target_language)
+    translated_lines = [line.strip() for line in translated.splitlines() if line.strip()]
+    if len(translated_lines) == len(texts):
+        return translated_lines
+
+    return [translator.translate(text, source_language, target_language) for text in texts]
 
 
 def _should_split_manual_group(regions: list[TextRegion], manual_box: tuple[int, int, int, int]) -> bool:

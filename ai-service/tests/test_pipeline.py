@@ -18,6 +18,15 @@ class EchoTranslator:
         return f"EN:{text}"
 
 
+class BatchEchoTranslator:
+    def __init__(self):
+        self.calls = []
+
+    def translate(self, text, source_language, target_language):
+        self.calls.append(text)
+        return "\n".join(f"EN:{line}" for line in text.splitlines())
+
+
 class PipelineTest(unittest.TestCase):
     def test_process_image_preserves_resolution_and_writes_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,9 +143,10 @@ class PipelineTest(unittest.TestCase):
                 TextRegion("\u6e90\u5934", 0.98, 82, 118, 70, 30, [(82, 118), (152, 118), (152, 148), (82, 148)]),
                 TextRegion("\u4e0d\u7ffb\u8bd1", 0.99, 280, 80, 80, 30, [(280, 80), (360, 80), (360, 110), (280, 110)]),
             ]
+            translator = BatchEchoTranslator()
             pipeline = ImageTranslationPipeline(
                 recognizer=StaticOcrRecognizer(regions),
-                translator=EchoTranslator(),
+                translator=translator,
             )
 
             result = pipeline.process_image(
@@ -166,9 +176,10 @@ class PipelineTest(unittest.TestCase):
                 TextRegion("\u4f9b\u7535\u7535\u6e90", 0.99, 75, 230, 90, 24, [(75, 230), (165, 230), (165, 254), (75, 254)]),
                 TextRegion("\u7535\u6c60", 0.99, 95, 290, 50, 24, [(95, 290), (145, 290), (145, 314), (95, 314)]),
             ]
+            translator = BatchEchoTranslator()
             pipeline = ImageTranslationPipeline(
                 recognizer=StaticOcrRecognizer(regions),
-                translator=EchoTranslator(),
+                translator=translator,
             )
 
             result = pipeline.process_image(
@@ -182,6 +193,8 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(result.regions_detected, 4)
             self.assertEqual(result.regions_replaced, 4)
             self.assertEqual([entry.source_text for entry in result.entries], [region.text for region in regions])
+            self.assertEqual([entry.translated_text for entry in result.entries], [f"EN:{region.text}" for region in regions])
+            self.assertEqual(len(translator.calls), 1)
             self.assertTrue(output_path.exists())
 
 
