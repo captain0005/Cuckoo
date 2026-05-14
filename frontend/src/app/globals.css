@@ -1293,7 +1293,13 @@ select {
 }
 
 .batch-file-input {
-  display: none;
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .batch-workspace {
@@ -1715,8 +1721,20 @@ select {
   font-weight: 800;
 }
 
+.canvas-tools button:disabled,
+.zoom-control button:disabled,
+.canvas-expanded-tools button:disabled {
+  color: #9aa8ba;
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .canvas-tools > button:last-child {
   color: #2bbf89;
+}
+
+.canvas-tools > button:last-child:disabled {
+  color: #9aa8ba;
 }
 
 .zoom-control {
@@ -1744,8 +1762,13 @@ select {
   min-height: 0;
   display: grid;
   place-items: center;
-  overflow: hidden;
+  overflow: auto;
   background: #f3f6fa;
+}
+
+.image-stage-shell.expanded {
+  min-height: min(76vh, 860px);
+  padding: 28px;
 }
 
 .image-stage {
@@ -1772,6 +1795,69 @@ select {
   display: block;
   pointer-events: none;
   user-select: none;
+}
+
+.image-stage.expanded {
+  max-height: 82vh;
+}
+
+.canvas-expanded-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(15, 23, 42, 0.56);
+}
+
+.canvas-expanded-panel {
+  width: min(1420px, 96vw);
+  max-height: 94vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(218, 226, 238, 0.9);
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 26px 80px rgba(7, 18, 35, 0.26);
+}
+
+.canvas-expanded-toolbar {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e8edf4;
+}
+
+.canvas-expanded-toolbar strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #20334e;
+  font-size: 16px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-expanded-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.canvas-expanded-tools > button {
+  min-width: 40px;
+  min-height: 38px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #314258;
+  font-size: 14px;
+  font-weight: 820;
 }
 
 .workspace-region,

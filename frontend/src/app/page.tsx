@@ -26,6 +26,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 type QueueStatus = "completed" | "processing" | "queued" | "failed";
 type RecognitionMode = "auto" | "manual";
+type InpaintEngine = "lama" | "opencv";
 type RegionMap = Record<string, ManualRegion[]>;
 type DemoKind = "shield" | "welder" | "params" | "device" | "cable" | "box" | "manual" | "parts";
 
@@ -64,9 +65,11 @@ export default function Home() {
   const [workflowState, setWorkflowState] = useState("idle");
   const [sourceLanguage, setSourceLanguage] = useState("zh");
   const [targetLanguage, setTargetLanguage] = useState("en");
+  const [inpaintEngine, setInpaintEngine] = useState<InpaintEngine>("lama");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [recognitionMode, setRecognitionMode] = useState<RecognitionMode>("manual");
   const [manualRegions, setManualRegions] = useState<RegionMap>({});
+  const [redoRegions, setRedoRegions] = useState<RegionMap>({});
   const [selectedRegionFileKey, setSelectedRegionFileKey] = useState("");
   const [userToken, setUserToken] = useState("");
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
@@ -97,6 +100,13 @@ export default function Home() {
     (job?.status === "completed" || job?.status === "partial") && job.download_url
       ? `${apiURL(job.download_url)}?token=${encodeURIComponent(userToken)}`
       : "";
+  const failedRetryFiles = useMemo(() => {
+    if (!job || (job.status !== "failed" && job.status !== "partial")) {
+      return [];
+    }
+    const completedNames = new Set(job.results?.map((item) => item.source_filename).filter(Boolean));
+    return files.filter((file) => !completedNames.has(file.name));
+  }, [files, job]);
 
   const refreshJob = useCallback(async () => {
     if (!job?.job_id || !userToken) {
@@ -155,12 +165,23 @@ export default function Home() {
     if (!files.length) {
       setSelectedRegionFileKey("");
       setManualRegions({});
+      setRedoRegions({});
       return;
     }
 
     const keys = new Set(files.map(fileKey));
     setSelectedRegionFileKey((currentKey) => (currentKey && keys.has(currentKey) ? currentKey : fileKey(files[0])));
     setManualRegions((currentRegions) => {
+      const nextRegions: RegionMap = {};
+      for (const file of files) {
+        const key = fileKey(file);
+        if (currentRegions[key]?.length) {
+          nextRegions[key] = currentRegions[key];
+        }
+      }
+      return nextRegions;
+    });
+    setRedoRegions((currentRegions) => {
       const nextRegions: RegionMap = {};
       for (const file of files) {
         const key = fileKey(file);
@@ -184,10 +205,20 @@ export default function Home() {
     setJob(null);
     setFiles([]);
     setManualRegions({});
+    setRedoRegions({});
     setWorkflowState("idle");
     setProgress(0);
     setStatusText("请登录后上传图片。");
     setLoginMessage("已退出登录。");
+  }
+
+  function openFilePicker() {
+    if (!fileInputRef.current) {
+      setStatusText("图片选择器还没有准备好，请稍后再试。");
+      return;
+    }
+    fileInputRef.current.value = "";
+    fileInputRef.current.click();
   }
 
   function updateFiles(nextFiles: File[]) {
@@ -215,13 +246,18 @@ export default function Home() {
       const duplicateCount = images.length - uniqueNewFiles.length;
       const overflowCount = Math.max(0, mergedFiles.length - MAX_FILES);
 
-      if (uniqueNewFiles[0] && !selectedRegionFileKey) {
+      if (uniqueNewFiles[0]) {
         setSelectedRegionFileKey(fileKey(uniqueNewFiles[0]));
+        setJob(null);
+        setProgress(0);
+        setWorkflowState("idle");
       }
       if (overflowCount > 0) {
         setStatusText(`已达到单次最多 ${MAX_FILES} 张，自动保留前 ${MAX_FILES} 张图片。`);
+      } else if (duplicateCount > 0 && uniqueNewFiles.length > 0) {
+        setStatusText(`已添加 ${uniqueNewFiles.length} 张，跳过 ${duplicateCount} 个重复文件，当前共 ${cappedFiles.length} 张。`);
       } else if (duplicateCount > 0) {
-        setStatusText(`已跳过 ${duplicateCount} 个重复文件，当前共 ${cappedFiles.length} 张图片。`);
+        setStatusText("这批图片已经在队列里了；如需重新处理同一张图，请先清空队列或选择其他文件。");
       } else {
         setStatusText(`已添加 ${uniqueNewFiles.length} 张图片，当前共 ${cappedFiles.length} 张。`);
       }
@@ -234,6 +270,10 @@ export default function Home() {
     setManualRegions((currentRegions) => ({
       ...currentRegions,
       [key]: updater(currentRegions[key] || []),
+    }));
+    setRedoRegions((currentRegions) => ({
+      ...currentRegions,
+      [key]: [],
     }));
   }
 
@@ -254,6 +294,7 @@ export default function Home() {
       }
       return nextRegions;
     });
+    setRedoRegions({});
     setStatusText(`已将当前 ${activeRegions.length} 个框选区域复制到全部图片。`);
   }
 
@@ -261,9 +302,50 @@ export default function Home() {
     setFiles([]);
     setJob(null);
     setManualRegions({});
+    setRedoRegions({});
     setProgress(0);
     setWorkflowState("idle");
     setStatusText("队列已清空，可以重新添加图片。");
+  }
+
+  function undoRegionForSelectedFile() {
+    if (!selectedFile) {
+      return;
+    }
+    const key = fileKey(selectedFile);
+    const currentFileRegions = manualRegions[key] || [];
+    if (!currentFileRegions.length) {
+      return;
+    }
+    const removedRegion = currentFileRegions[currentFileRegions.length - 1];
+    setManualRegions((currentRegions) => ({
+      ...currentRegions,
+      [key]: (currentRegions[key] || []).slice(0, -1),
+    }));
+    setRedoRegions((currentRedoRegions) => ({
+      ...currentRedoRegions,
+      [key]: [...(currentRedoRegions[key] || []), removedRegion],
+    }));
+  }
+
+  function redoRegionForSelectedFile() {
+    if (!selectedFile) {
+      return;
+    }
+    const key = fileKey(selectedFile);
+    const currentRedo = redoRegions[key] || [];
+    if (!currentRedo.length) {
+      return;
+    }
+    const restoredRegion = currentRedo[currentRedo.length - 1];
+    setManualRegions((currentRegions) => ({
+      ...currentRegions,
+      [key]: [...(currentRegions[key] || []), restoredRegion],
+    }));
+    setRedoRegions((currentRedoRegions) => ({
+      ...currentRedoRegions,
+      [key]: (currentRedoRegions[key] || []).slice(0, -1),
+    }));
   }
 
   async function handleUserLogin(event: FormEvent<HTMLFormElement>) {
@@ -286,13 +368,13 @@ export default function Home() {
     }
   }
 
-  async function startTranslation() {
+  async function startTranslation(targetFiles = files) {
     if (!isAuthenticated) {
       setStatusText("请先登录后再创建翻译任务。");
       setProgress(0);
       return;
     }
-    if (!files.length) {
+    if (!targetFiles.length) {
       setStatusText("请先添加要翻译的商品图片。");
       setProgress(0);
       return;
@@ -305,11 +387,11 @@ export default function Home() {
     setProgress(3);
 
     try {
-      const regionsByFile = recognitionMode === "manual" ? files.map((file) => manualRegions[fileKey(file)] || []) : [];
-      const createdJob = await createJob(files, sourceLanguage, targetLanguage, {
+      const regionsByFile = recognitionMode === "manual" ? targetFiles.map((file) => manualRegions[fileKey(file)] || []) : [];
+      const createdJob = await createJob(targetFiles, sourceLanguage, targetLanguage, {
         token: userToken,
         manualRegions: regionsByFile,
-        inpaintEngine: "lama",
+        inpaintEngine,
       });
       renderJobState(createdJob, setWorkflowState, setStatusText, setProgress);
       setJob(createdJob);
@@ -319,6 +401,17 @@ export default function Home() {
       setProgress(0);
       setIsSubmitting(false);
     }
+  }
+
+  function retryFailedImages() {
+    if (!failedRetryFiles.length) {
+      setStatusText("当前没有失败项可重跑。");
+      return;
+    }
+    setFiles(failedRetryFiles);
+    setSelectedRegionFileKey(fileKey(failedRetryFiles[0]));
+    setStatusText(`已筛出 ${failedRetryFiles.length} 张失败图片，正在重跑。`);
+    void startTranslation(failedRetryFiles);
   }
 
   return (
@@ -382,7 +475,7 @@ export default function Home() {
             selectedKey={selectedKey}
             totalSize={totalSize}
             regionCount={regionCount}
-            onAddClick={() => fileInputRef.current?.click()}
+            onAddClick={openFilePicker}
             onCopyClick={copyActiveRegionsToAll}
             onSelectRow={(row) => {
               if (row.file) {
@@ -399,6 +492,7 @@ export default function Home() {
               statusText={statusText}
               workflowState={workflowState}
               recognitionMode={recognitionMode}
+              canRedo={selectedFile ? Boolean(redoRegions[fileKey(selectedFile)]?.length) : false}
               onRecognitionModeChange={setRecognitionMode}
               onAddRegion={(region) => {
                 if (selectedFile) {
@@ -419,19 +513,16 @@ export default function Home() {
                   );
                 }
               }}
-              onUndoRegion={() => {
-                if (selectedFile) {
-                  updateRegionsForFile(selectedFile, (currentRegions) => currentRegions.slice(0, -1));
-                }
-              }}
+              onUndoRegion={undoRegionForSelectedFile}
+              onRedoRegion={redoRegionForSelectedFile}
             />
 
             <ResultPreviewPanel
               files={files}
               job={job}
               downloadHref={downloadHref}
-              onRetry={() => void startTranslation()}
-              isRetryDisabled={isSubmitting || !files.length}
+              onRetry={retryFailedImages}
+              isRetryDisabled={isSubmitting || !failedRetryFiles.length}
             />
           </section>
 
@@ -439,6 +530,7 @@ export default function Home() {
             rows={queueRows}
             sourceLanguage={sourceLanguage}
             targetLanguage={targetLanguage}
+            inpaintEngine={inpaintEngine}
             progress={visibleProgress}
             completed={visibleCompleted}
             total={visibleTotal}
@@ -446,6 +538,7 @@ export default function Home() {
             hasFiles={files.length > 0}
             onSourceLanguageChange={setSourceLanguage}
             onTargetLanguageChange={setTargetLanguage}
+            onInpaintEngineChange={setInpaintEngine}
             onStart={() => void startTranslation()}
             onClearQueue={clearQueue}
           />
@@ -581,11 +674,13 @@ function ImageEditorPanel({
   statusText,
   workflowState,
   recognitionMode,
+  canRedo,
   onRecognitionModeChange,
   onAddRegion,
   onChangeRegion,
   onDeleteRegion,
   onUndoRegion,
+  onRedoRegion,
 }: {
   file: File | null;
   regions: ManualRegion[];
@@ -593,13 +688,17 @@ function ImageEditorPanel({
   statusText: string;
   workflowState: string;
   recognitionMode: RecognitionMode;
+  canRedo: boolean;
   onRecognitionModeChange: (mode: RecognitionMode) => void;
   onAddRegion: (region: ManualRegion) => void;
   onChangeRegion: (index: number, region: ManualRegion) => void;
   onDeleteRegion: (index: number) => void;
   onUndoRegion: () => void;
+  onRedoRegion: () => void;
 }) {
   const [selectedRegionIndex, setSelectedRegionIndex] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   useEffect(() => {
     if (selectedRegionIndex > regions.length - 1) {
@@ -607,15 +706,66 @@ function ImageEditorPanel({
     }
   }, [regions.length, selectedRegionIndex]);
 
+  useEffect(() => {
+    if (!isExpanded) {
+      return;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsExpanded(false);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isExpanded]);
+
   const isManualMode = recognitionMode === "manual";
   const visibleRegions = isManualMode ? regions : [];
   const hasRegions = visibleRegions.length > 0;
   const selectedRegionExists = isManualMode && selectedRegionIndex >= 0 && selectedRegionIndex < visibleRegions.length;
+  const zoomPercent = Math.round(zoom * 100);
   const hintText = !filesCount
     ? "当前显示示例图，添加图片后即可框选真实区域"
     : isManualMode
       ? "拖拽框选区域，调整大小和位置"
       : "自动识别会扫描整张图，无需框选区域";
+
+  function changeZoom(delta: number) {
+    setZoom((currentZoom) => Math.round(clamp(currentZoom + delta, 0.5, 3) * 100) / 100);
+  }
+
+  function resetZoom() {
+    setZoom(1);
+  }
+
+  function openExpandedEditor() {
+    if (!file) {
+      return;
+    }
+    setZoom((currentZoom) => Math.max(currentZoom, 1.35));
+    setIsExpanded(true);
+  }
+
+  function renderCanvas(expanded = false) {
+    return file ? (
+      <ManualImageCanvas
+        file={file}
+        regions={visibleRegions}
+        readOnly={!isManualMode}
+        selectedRegionIndex={selectedRegionIndex}
+        zoom={zoom}
+        expanded={expanded}
+        onSelectRegion={setSelectedRegionIndex}
+        onAddRegion={(region) => {
+          onAddRegion(region);
+          setSelectedRegionIndex(regions.length);
+        }}
+        onChangeRegion={onChangeRegion}
+      />
+    ) : (
+      <DemoProductCanvas />
+    );
+  }
 
   return (
     <section className="canvas-panel">
@@ -639,41 +789,56 @@ function ImageEditorPanel({
           </button>
         </div>
         <div className="canvas-tools" aria-label="画布工具">
-          <button type="button" onClick={onUndoRegion} disabled={!hasRegions} title="撤销上一个框选">
+          <button type="button" onClick={onUndoRegion} disabled={!hasRegions || !isManualMode} title="撤销上一个框选">
             ↶
           </button>
-          <button type="button" disabled title="重做">
+          <button type="button" onClick={onRedoRegion} disabled={!canRedo || !isManualMode} title="重做框选">
             ↷
           </button>
           <div className="zoom-control" aria-label="缩放">
-            <button type="button">−</button>
-            <span>97%</span>
-            <button type="button">+</button>
+            <button type="button" onClick={() => changeZoom(-0.1)} disabled={zoom <= 0.5} title="缩小">
+              −
+            </button>
+            <span>{zoomPercent}%</span>
+            <button type="button" onClick={() => changeZoom(0.1)} disabled={zoom >= 3} title="放大">
+              +
+            </button>
           </div>
-          <button type="button" title="适配画布">
+          <button type="button" onClick={openExpandedEditor} disabled={!file} title="放大编辑">
             ⛶
           </button>
         </div>
       </div>
 
-      <div className="image-stage-shell">
-        {file ? (
-          <ManualImageCanvas
-            file={file}
-            regions={visibleRegions}
-            readOnly={!isManualMode}
-            selectedRegionIndex={selectedRegionIndex}
-            onSelectRegion={setSelectedRegionIndex}
-            onAddRegion={(region) => {
-              onAddRegion(region);
-              setSelectedRegionIndex(regions.length);
-            }}
-            onChangeRegion={onChangeRegion}
-          />
-        ) : (
-          <DemoProductCanvas />
-        )}
-      </div>
+      <div className="image-stage-shell">{renderCanvas()}</div>
+
+      {isExpanded && file ? (
+        <div className="canvas-expanded-backdrop" role="dialog" aria-modal="true" aria-label="放大编辑图片">
+          <div className="canvas-expanded-panel">
+            <div className="canvas-expanded-toolbar">
+              <strong>{file.name}</strong>
+              <div className="canvas-expanded-tools">
+                <button type="button" onClick={resetZoom}>
+                  适配
+                </button>
+                <div className="zoom-control" aria-label="放大编辑缩放">
+                  <button type="button" onClick={() => changeZoom(-0.1)} disabled={zoom <= 0.5} title="缩小">
+                    −
+                  </button>
+                  <span>{zoomPercent}%</span>
+                  <button type="button" onClick={() => changeZoom(0.1)} disabled={zoom >= 3} title="放大">
+                    +
+                  </button>
+                </div>
+                <button type="button" onClick={() => setIsExpanded(false)} aria-label="关闭放大编辑">
+                  X
+                </button>
+              </div>
+            </div>
+            <div className="image-stage-shell expanded">{renderCanvas(true)}</div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="canvas-hint-row">
         <span className="info-dot">i</span>
@@ -703,6 +868,8 @@ function ManualImageCanvas({
   regions,
   readOnly,
   selectedRegionIndex,
+  zoom,
+  expanded = false,
   onSelectRegion,
   onAddRegion,
   onChangeRegion,
@@ -711,6 +878,8 @@ function ManualImageCanvas({
   regions: ManualRegion[];
   readOnly: boolean;
   selectedRegionIndex: number;
+  zoom: number;
+  expanded?: boolean;
   onSelectRegion: (index: number) => void;
   onAddRegion: (region: ManualRegion) => void;
   onChangeRegion: (index: number, region: ManualRegion) => void;
@@ -740,6 +909,32 @@ function ManualImageCanvas({
     };
   }
 
+  function capturePointer(event: ReactPointerEvent<HTMLElement>) {
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Selection continues to work if a browser rejects capture after a fast release.
+    }
+  }
+
+  function capturePointerOnFrame(event: ReactPointerEvent<HTMLElement>) {
+    try {
+      frameRef.current?.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is an interaction aid, not a requirement.
+    }
+  }
+
+  function releasePointerCapture(event: ReactPointerEvent<HTMLElement>) {
+    const frame = frameRef.current;
+    if (frame?.hasPointerCapture(event.pointerId)) {
+      frame.releasePointerCapture(event.pointerId);
+    }
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
   function handleFramePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (readOnly || event.button !== 0) {
       return;
@@ -749,7 +944,7 @@ function ManualImageCanvas({
     onSelectRegion(-1);
     setAction({ type: "draw", start: point });
     setDraftRegion({ x: point.x, y: point.y, width: 0, height: 0 });
-    event.currentTarget.setPointerCapture(event.pointerId);
+    capturePointer(event);
   }
 
   function handleRegionPointerDown(event: ReactPointerEvent<HTMLSpanElement>, index: number) {
@@ -761,7 +956,7 @@ function ManualImageCanvas({
     onSelectRegion(index);
     setDraftRegion(null);
     setAction({ type: "move", index, start: normalizedPoint(event), original: regions[index] });
-    frameRef.current?.setPointerCapture(event.pointerId);
+    capturePointerOnFrame(event);
   }
 
   function handleResizePointerDown(event: ReactPointerEvent<HTMLSpanElement>, index: number) {
@@ -773,7 +968,7 @@ function ManualImageCanvas({
     onSelectRegion(index);
     setDraftRegion(null);
     setAction({ type: "resize", index, start: normalizedPoint(event), original: regions[index] });
-    frameRef.current?.setPointerCapture(event.pointerId);
+    capturePointerOnFrame(event);
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
@@ -809,6 +1004,7 @@ function ManualImageCanvas({
   }
 
   function finishPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    releasePointerCapture(event);
     if (readOnly || !action) {
       return;
     }
@@ -820,19 +1016,28 @@ function ManualImageCanvas({
     setDraftRegion(null);
   }
 
+  const stageMaxHeight = expanded ? `${Math.round(82 * zoom)}vh` : `${Math.round(59 * zoom)}vh`;
+  const stageMaxWidth = `${Math.round(100 * zoom)}%`;
+
   return (
     <div
-      className={`image-stage${readOnly ? " read-only" : ""}`}
+      className={`image-stage${readOnly ? " read-only" : ""}${expanded ? " expanded" : ""}`}
       ref={frameRef}
+      style={{ maxHeight: stageMaxHeight, maxWidth: stageMaxWidth }}
       onPointerDown={handleFramePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={finishPointer}
-      onPointerCancel={() => {
+      onPointerCancel={(event) => {
+        releasePointerCapture(event);
+        setAction(null);
+        setDraftRegion(null);
+      }}
+      onLostPointerCapture={() => {
         setAction(null);
         setDraftRegion(null);
       }}
     >
-      {previewURL ? <img src={previewURL} alt={file.name} draggable={false} /> : null}
+      {previewURL ? <img src={previewURL} alt={file.name} draggable={false} style={{ maxHeight: stageMaxHeight, maxWidth: stageMaxWidth }} /> : null}
       {[...regions, ...(draftRegion ? [draftRegion] : [])].map((region, index) => {
         const isDraft = index >= regions.length;
         return (
@@ -953,6 +1158,7 @@ function TaskPanel({
   rows,
   sourceLanguage,
   targetLanguage,
+  inpaintEngine,
   progress,
   completed,
   total,
@@ -960,12 +1166,14 @@ function TaskPanel({
   hasFiles,
   onSourceLanguageChange,
   onTargetLanguageChange,
+  onInpaintEngineChange,
   onStart,
   onClearQueue,
 }: {
   rows: QueueRow[];
   sourceLanguage: string;
   targetLanguage: string;
+  inpaintEngine: InpaintEngine;
   progress: number;
   completed: number;
   total: number;
@@ -973,6 +1181,7 @@ function TaskPanel({
   hasFiles: boolean;
   onSourceLanguageChange: (value: string) => void;
   onTargetLanguageChange: (value: string) => void;
+  onInpaintEngineChange: (value: InpaintEngine) => void;
   onStart: () => void;
   onClearQueue: () => void;
 }) {
@@ -998,8 +1207,9 @@ function TaskPanel({
         </label>
         <label>
           擦除模式
-          <select value="lama" disabled>
+          <select value={inpaintEngine} onChange={(event) => onInpaintEngineChange(event.target.value as InpaintEngine)}>
             <option value="lama">高清 LAMA 擦除</option>
+            <option value="opencv">快速 OpenCV 擦除</option>
           </select>
         </label>
         <label>
