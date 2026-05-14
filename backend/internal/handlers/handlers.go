@@ -472,7 +472,14 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 
 		itemCtx, cancelItem := context.WithCancel(ctx)
 		h.setActiveCurrentCancel(jobID, cancelItem)
-		result, err := h.aiClient.TranslateImage(itemCtx, upload.InputPath, sourceLanguage, targetLanguage, inpaintEngine, upload.ManualRegions)
+		result, err := h.translateImageWithInpaintFallback(
+			itemCtx,
+			upload.InputPath,
+			sourceLanguage,
+			targetLanguage,
+			inpaintEngine,
+			upload.ManualRegions,
+		)
 		h.clearActiveCurrentCancel(jobID)
 		cancelItem()
 		if err != nil {
@@ -533,6 +540,43 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 		return
 	}
 	_ = h.repo.FinalizeJobFromItems(jobID)
+}
+
+func (h *Handler) translateImageWithInpaintFallback(
+	ctx context.Context,
+	imagePath string,
+	sourceLanguage string,
+	targetLanguage string,
+	inpaintEngine string,
+	manualRegions []services.ManualRegion,
+) (*services.AITranslationResponse, error) {
+	result, err := h.aiClient.TranslateImage(ctx, imagePath, sourceLanguage, targetLanguage, inpaintEngine, manualRegions)
+	if err == nil || !shouldFallbackToOpenCV(inpaintEngine, err) {
+		return result, err
+	}
+
+	fallbackResult, fallbackErr := h.aiClient.TranslateImage(ctx, imagePath, sourceLanguage, targetLanguage, "opencv", manualRegions)
+	if fallbackErr != nil {
+		return nil, errors.Join(err, fallbackErr)
+	}
+	fallbackResult.Warnings = append(
+		[]string{"高清 LAMA 擦除连接中断，已自动切换快速 OpenCV 擦除。"},
+		fallbackResult.Warnings...,
+	)
+	return fallbackResult, nil
+}
+
+func shouldFallbackToOpenCV(inpaintEngine string, err error) bool {
+	engine := strings.ToLower(strings.TrimSpace(inpaintEngine))
+	if engine != "" && engine != "auto" && engine != "lama" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "eof") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "server closed idle connection") ||
+		strings.Contains(message, "broken pipe")
 }
 
 func (h *Handler) toJobResponse(job *models.Job) models.JobResponse {
