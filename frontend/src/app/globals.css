@@ -1624,10 +1624,10 @@ select {
   padding-top: 20px;
 }
 
-.primary-action,
-.secondary-action,
-.danger-action,
-.task-start-button {
+.batch-app .primary-action,
+.batch-app .secondary-action,
+.batch-app .danger-action,
+.batch-app .task-start-button {
   min-height: 68px;
   display: inline-flex;
   align-items: center;
@@ -1640,19 +1640,19 @@ select {
   cursor: pointer;
 }
 
-.primary-action,
-.task-start-button {
+.batch-app .primary-action,
+.batch-app .task-start-button {
   background: linear-gradient(135deg, #078f87, #08a3a0);
   color: #ffffff;
 }
 
-.secondary-action {
+.batch-app .secondary-action {
   border-color: #0a9b94;
   background: #ffffff;
   color: #07928b;
 }
 
-.danger-action {
+.batch-app .danger-action {
   width: 100%;
   min-height: 54px;
   margin-top: 20px;
@@ -1662,14 +1662,22 @@ select {
   font-size: 16px;
 }
 
-.primary-action:disabled,
-.secondary-action:disabled,
-.danger-action:disabled,
-.task-start-button:disabled,
+.batch-app .primary-action:disabled,
+.batch-app .secondary-action:disabled,
+.batch-app .danger-action:disabled,
+.batch-app .task-start-button:disabled,
 .segmented-control button:disabled,
 .batch-app select:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.batch-app .queue-actions .primary-action:disabled,
+.batch-app .queue-actions .secondary-action:disabled {
+  border-color: #e3e9f1;
+  background: #f7f9fc;
+  color: #9aa8ba;
+  opacity: 1;
 }
 
 .workspace-main {
@@ -1694,6 +1702,14 @@ select {
   margin-bottom: 14px;
 }
 
+.canvas-mode-group {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1 1 auto;
+}
+
 .task-mode-pill {
   min-height: 38px;
   display: inline-flex;
@@ -1715,6 +1731,22 @@ select {
   color: #078f8a;
 }
 
+.task-lock-note {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #65758a;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.task-lock-note svg {
+  flex: 0 0 auto;
+  color: #6e7f93;
+}
+
 .task-mode-pill small {
   color: #697a91;
   font-size: 12px;
@@ -1722,8 +1754,8 @@ select {
 }
 
 .segmented-control {
-  width: min(315px, 44%);
-  min-width: 260px;
+  width: 280px;
+  flex: 0 0 280px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   overflow: hidden;
@@ -2283,6 +2315,27 @@ select {
     #ffffff;
 }
 
+.select-shell {
+  position: relative;
+  display: block;
+}
+
+.select-shell svg {
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #9aa8ba;
+  pointer-events: none;
+}
+
+.select-shell.locked select {
+  border-color: #e1e7f0;
+  background: #f8fafc;
+  color: #7a8798;
+  padding-right: 40px;
+}
+
 .task-start-button {
   min-height: 50px;
   margin: 18px 0 22px;
@@ -2291,14 +2344,17 @@ select {
 
 .task-cancel-actions {
   display: grid;
-  gap: 10px;
-  margin: -6px 0 22px;
+  gap: 12px;
+  margin: 18px 0 24px;
 }
 
 .task-cancel-actions .secondary-action,
 .task-cancel-actions .danger-action {
-  min-height: 46px;
+  width: 100%;
+  min-height: 48px;
   margin-top: 0;
+  border-style: solid;
+  background: #ffffff;
   font-size: 15px;
 }
 
@@ -2516,8 +2572,8 @@ select {
     padding: 5px 8px;
   }
 
-  .primary-action,
-  .secondary-action {
+  .batch-app .primary-action,
+  .batch-app .secondary-action {
     min-height: 56px;
     font-size: 16px;
   }
@@ -2587,8 +2643,14 @@ select {
     grid-template-columns: 1fr;
   }
 
+  .canvas-mode-group {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .segmented-control {
     width: 100%;
+    flex-basis: auto;
     min-width: 0;
   }
 

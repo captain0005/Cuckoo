@@ -862,29 +862,36 @@ function ImageEditorPanel({
   return (
     <section className="canvas-panel">
       <div className="canvas-toolbar">
-        <div className="segmented-control" aria-label="识别模式">
-          <button
-            className={recognitionMode === "auto" ? "active" : ""}
-            type="button"
-            aria-pressed={recognitionMode === "auto"}
-            disabled={isLocked}
-            onClick={() => onRecognitionModeChange("auto")}
-          >
-            自动识别
-          </button>
-          <button
-            className={recognitionMode === "manual" ? "active" : ""}
-            type="button"
-            aria-pressed={recognitionMode === "manual"}
-            disabled={isLocked}
-            onClick={() => onRecognitionModeChange("manual")}
-          >
-            手动框选
-          </button>
-        </div>
-        <div className={`task-mode-pill${isLocked ? " locked" : ""}`}>
-          <span>{taskBadge}</span>
-          {isLocked ? <small>选区已锁定，只读显示</small> : null}
+        <div className="canvas-mode-group">
+          <div className="segmented-control" aria-label="识别模式">
+            <button
+              className={recognitionMode === "auto" ? "active" : ""}
+              type="button"
+              aria-pressed={recognitionMode === "auto"}
+              disabled={isLocked}
+              onClick={() => onRecognitionModeChange("auto")}
+            >
+              自动识别
+            </button>
+            <button
+              className={recognitionMode === "manual" ? "active" : ""}
+              type="button"
+              aria-pressed={recognitionMode === "manual"}
+              disabled={isLocked}
+              onClick={() => onRecognitionModeChange("manual")}
+            >
+              手动框选
+            </button>
+          </div>
+          <div className={`task-mode-pill${isLocked ? " locked" : ""}`}>
+            <span>{taskBadge}</span>
+          </div>
+          {isLocked ? (
+            <div className="task-lock-note" aria-label="选区已锁定，只读显示">
+              <LockIcon />
+              <span>选区已锁定，只读显示</span>
+            </div>
+          ) : null}
         </div>
         <div className="canvas-tools" aria-label="画布工具">
           <button type="button" onClick={onUndoRegion} disabled={isLocked || !hasRegions || !isManualMode} title="撤销上一个框选">
@@ -1297,38 +1304,52 @@ function TaskPanel({
       <div className="task-controls">
         <label>
           源语言
-          <select value={sourceLanguage} onChange={(event) => onSourceLanguageChange(event.target.value)} disabled={isTaskLocked}>
-            <option value="zh">中文</option>
-          </select>
+          <span className={`select-shell${isTaskLocked ? " locked" : ""}`}>
+            <select value={sourceLanguage} onChange={(event) => onSourceLanguageChange(event.target.value)} disabled={isTaskLocked}>
+              <option value="zh">中文</option>
+            </select>
+            {isTaskLocked ? <LockIcon /> : null}
+          </span>
         </label>
         <label>
           目标语言
-          <select value={targetLanguage} onChange={(event) => onTargetLanguageChange(event.target.value)} disabled={isTaskLocked}>
-            <option value="en">英文</option>
-            <option value="ja">日文</option>
-            <option value="ko">韩文</option>
-            <option value="fr">法文</option>
-            <option value="de">德文</option>
-          </select>
+          <span className={`select-shell${isTaskLocked ? " locked" : ""}`}>
+            <select value={targetLanguage} onChange={(event) => onTargetLanguageChange(event.target.value)} disabled={isTaskLocked}>
+              <option value="en">英文</option>
+              <option value="ja">日文</option>
+              <option value="ko">韩文</option>
+              <option value="fr">法文</option>
+              <option value="de">德文</option>
+            </select>
+            {isTaskLocked ? <LockIcon /> : null}
+          </span>
         </label>
         <label>
           擦除模式
-          <select value={inpaintEngine} onChange={(event) => onInpaintEngineChange(event.target.value as InpaintEngine)} disabled={isTaskLocked}>
-            <option value="lama">高清 LAMA 擦除</option>
-            <option value="opencv">快速 OpenCV 擦除</option>
-          </select>
+          <span className={`select-shell${isTaskLocked ? " locked" : ""}`}>
+            <select value={inpaintEngine} onChange={(event) => onInpaintEngineChange(event.target.value as InpaintEngine)} disabled={isTaskLocked}>
+              <option value="lama">高清 LAMA 擦除</option>
+              <option value="opencv">快速 OpenCV 擦除</option>
+            </select>
+            {isTaskLocked ? <LockIcon /> : null}
+          </span>
         </label>
         <label>
           处理策略
-          <select value="continue" disabled>
-            <option value="continue">失败继续</option>
-          </select>
+          <span className={`select-shell${isTaskLocked ? " locked" : ""}`}>
+            <select value="continue" disabled>
+              <option value="continue">失败继续</option>
+            </select>
+            {isTaskLocked ? <LockIcon /> : null}
+          </span>
         </label>
       </div>
 
-      <button className="task-start-button" type="button" onClick={onStart} disabled={isTaskLocked || isSubmitting || !hasFiles}>
-        {isSubmitting ? "处理中..." : "开始批量翻译"}
-      </button>
+      {!isTaskLocked ? (
+        <button className="task-start-button" type="button" onClick={onStart} disabled={isSubmitting || !hasFiles}>
+          {isSubmitting ? "处理中..." : "开始批量翻译"}
+        </button>
+      ) : null}
 
       {isTaskLocked ? (
         <div className="task-cancel-actions">
@@ -1670,6 +1691,15 @@ function RefreshIcon() {
     <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none">
       <path d="M20 12a8 8 0 0 1-13.66 5.66M4 12A8 8 0 0 1 17.66 6.34" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       <path d="M7 18H4v3M17 6h3V3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none">
+      <rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" strokeWidth="2" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
