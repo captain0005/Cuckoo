@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
   apiURL,
+  cancelCurrentJobItem,
+  cancelJob,
   createJob,
   fetchJob,
   fetchMe,
@@ -22,13 +24,15 @@ const STATUS_LABELS: Record<string, string> = {
   completed: "已完成",
   partial: "部分完成",
   failed: "失败",
+  canceled: "已取消",
 };
 
-type QueueStatus = "completed" | "processing" | "queued" | "failed";
+type QueueStatus = "completed" | "processing" | "queued" | "failed" | "canceled";
 type RecognitionMode = "auto" | "manual";
 type InpaintEngine = "lama" | "opencv";
 type RegionMap = Record<string, ManualRegion[]>;
 type DemoKind = "shield" | "welder" | "params" | "device" | "cable" | "box" | "manual" | "parts";
+type ResizeHandle = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
 
 type QueueRow = {
   id: string;
@@ -44,7 +48,16 @@ type QueueRow = {
 type CanvasAction =
   | { type: "draw"; start: { x: number; y: number } }
   | { type: "move"; index: number; start: { x: number; y: number }; original: ManualRegion }
-  | { type: "resize"; index: number; start: { x: number; y: number }; original: ManualRegion };
+  | { type: "resize"; index: number; handle: ResizeHandle; start: { x: number; y: number }; original: ManualRegion };
+
+type TaskSnapshot = {
+  recognitionMode: RecognitionMode;
+  sourceLanguage: string;
+  targetLanguage: string;
+  inpaintEngine: InpaintEngine;
+  files: File[];
+  regionsByKey: RegionMap;
+};
 
 const DEMO_QUEUE: QueueRow[] = [
   { id: "demo-shield", index: 1, name: "实力源头.png", sizeLabel: "312 KB", status: "completed", progress: 100, demoKind: "shield" },
@@ -70,6 +83,7 @@ export default function Home() {
   const [recognitionMode, setRecognitionMode] = useState<RecognitionMode>("manual");
   const [manualRegions, setManualRegions] = useState<RegionMap>({});
   const [redoRegions, setRedoRegions] = useState<RegionMap>({});
+  const [activeTaskSnapshot, setActiveTaskSnapshot] = useState<TaskSnapshot | null>(null);
   const [selectedRegionFileKey, setSelectedRegionFileKey] = useState("");
   const [userToken, setUserToken] = useState("");
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
@@ -87,15 +101,23 @@ export default function Home() {
     [files, selectedRegionFileKey],
   );
   const selectedKey = selectedFile ? fileKey(selectedFile) : "demo-params";
-  const activeRegions = selectedFile ? manualRegions[fileKey(selectedFile)] || [] : [];
+  const isTaskRunning =
+    isSubmitting ||
+    workflowState === "uploading" ||
+    job?.status === "queued" ||
+    job?.status === "processing";
+  const displayRecognitionMode = isTaskRunning && activeTaskSnapshot ? activeTaskSnapshot.recognitionMode : recognitionMode;
+  const displayRegionsByKey =
+    isTaskRunning && activeTaskSnapshot && activeTaskSnapshot.recognitionMode === "manual" ? activeTaskSnapshot.regionsByKey : manualRegions;
+  const activeRegions = selectedFile ? displayRegionsByKey[fileKey(selectedFile)] || [] : [];
   const resultCount = job?.results?.length ?? 0;
   const regionCount = useMemo(
-    () => files.reduce((sum, file) => sum + (manualRegions[fileKey(file)]?.length || 0), 0),
-    [files, manualRegions],
+    () => files.reduce((sum, file) => sum + (displayRegionsByKey[fileKey(file)]?.length || 0), 0),
+    [files, displayRegionsByKey],
   );
   const visibleProgress = files.length || job ? Math.max(0, Math.min(100, progress)) : 23;
   const visibleTotal = job?.total || (files.length ? files.length : 30);
-  const visibleCompleted = job?.completed ?? (files.length ? resultCount : 7);
+  const visibleCompleted = job?.processed ?? job?.completed ?? (files.length ? resultCount : 7);
   const downloadHref =
     (job?.status === "completed" || job?.status === "partial") && job.download_url
       ? `${apiURL(job.download_url)}?token=${encodeURIComponent(userToken)}`
@@ -116,7 +138,7 @@ export default function Home() {
       const nextJob = await fetchJob(job.job_id, userToken);
       renderJobState(nextJob, setWorkflowState, setStatusText, setProgress);
       setJob(nextJob);
-      if (nextJob.status === "completed" || nextJob.status === "failed" || nextJob.status === "partial") {
+      if (nextJob.status === "completed" || nextJob.status === "failed" || nextJob.status === "partial" || nextJob.status === "canceled") {
         setIsSubmitting(false);
       }
     } catch (error) {
@@ -154,7 +176,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!job?.job_id || job.status === "completed" || job.status === "failed" || job.status === "partial") {
+    if (!job?.job_id || job.status === "completed" || job.status === "failed" || job.status === "partial" || job.status === "canceled") {
       return;
     }
     const timer = window.setInterval(refreshJob, 1200);
@@ -166,6 +188,7 @@ export default function Home() {
       setSelectedRegionFileKey("");
       setManualRegions({});
       setRedoRegions({});
+      setActiveTaskSnapshot(null);
       return;
     }
 
@@ -206,6 +229,7 @@ export default function Home() {
     setFiles([]);
     setManualRegions({});
     setRedoRegions({});
+    setActiveTaskSnapshot(null);
     setWorkflowState("idle");
     setProgress(0);
     setStatusText("请登录后上传图片。");
@@ -249,6 +273,7 @@ export default function Home() {
       if (uniqueNewFiles[0]) {
         setSelectedRegionFileKey(fileKey(uniqueNewFiles[0]));
         setJob(null);
+        setActiveTaskSnapshot(null);
         setProgress(0);
         setWorkflowState("idle");
       }
@@ -303,6 +328,7 @@ export default function Home() {
     setJob(null);
     setManualRegions({});
     setRedoRegions({});
+    setActiveTaskSnapshot(null);
     setProgress(0);
     setWorkflowState("idle");
     setStatusText("队列已清空，可以重新添加图片。");
@@ -348,6 +374,22 @@ export default function Home() {
     }));
   }
 
+  function createTaskSnapshot(targetFiles: File[]): TaskSnapshot {
+    const regionsByKey: RegionMap = {};
+    for (const file of targetFiles) {
+      const key = fileKey(file);
+      regionsByKey[key] = (manualRegions[key] || []).map((region) => ({ ...region }));
+    }
+    return {
+      recognitionMode,
+      sourceLanguage,
+      targetLanguage,
+      inpaintEngine,
+      files: [...targetFiles],
+      regionsByKey,
+    };
+  }
+
   async function handleUserLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsLoginBusy(true);
@@ -380,6 +422,8 @@ export default function Home() {
       return;
     }
 
+    const taskSnapshot = createTaskSnapshot(targetFiles);
+    setActiveTaskSnapshot(taskSnapshot);
     setIsSubmitting(true);
     setJob(null);
     setWorkflowState("uploading");
@@ -392,10 +436,12 @@ export default function Home() {
         token: userToken,
         manualRegions: regionsByFile,
         inpaintEngine,
+        recognitionMode,
       });
       renderJobState(createdJob, setWorkflowState, setStatusText, setProgress);
       setJob(createdJob);
     } catch (error) {
+      setActiveTaskSnapshot(null);
       setWorkflowState("failed");
       setStatusText(error instanceof Error ? error.message : "任务创建失败。");
       setProgress(0);
@@ -412,6 +458,33 @@ export default function Home() {
     setSelectedRegionFileKey(fileKey(failedRetryFiles[0]));
     setStatusText(`已筛出 ${failedRetryFiles.length} 张失败图片，正在重跑。`);
     void startTranslation(failedRetryFiles);
+  }
+
+  async function cancelCurrentImage() {
+    if (!job?.job_id || !userToken) {
+      return;
+    }
+    try {
+      const nextJob = await cancelCurrentJobItem(job.job_id, userToken);
+      renderJobState(nextJob, setWorkflowState, setStatusText, setProgress);
+      setJob(nextJob);
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : "取消当前图片失败。");
+    }
+  }
+
+  async function cancelEntireJob() {
+    if (!job?.job_id || !userToken) {
+      return;
+    }
+    try {
+      const nextJob = await cancelJob(job.job_id, userToken);
+      renderJobState(nextJob, setWorkflowState, setStatusText, setProgress);
+      setJob(nextJob);
+      setIsSubmitting(false);
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : "取消整批任务失败。");
+    }
   }
 
   return (
@@ -475,6 +548,7 @@ export default function Home() {
             selectedKey={selectedKey}
             totalSize={totalSize}
             regionCount={regionCount}
+            actionsDisabled={isTaskRunning}
             onAddClick={openFilePicker}
             onCopyClick={copyActiveRegionsToAll}
             onSelectRow={(row) => {
@@ -491,7 +565,9 @@ export default function Home() {
               filesCount={files.length}
               statusText={statusText}
               workflowState={workflowState}
-              recognitionMode={recognitionMode}
+              recognitionMode={displayRecognitionMode}
+              isLocked={isTaskRunning}
+              taskSnapshot={isTaskRunning ? activeTaskSnapshot : null}
               canRedo={selectedFile ? Boolean(redoRegions[fileKey(selectedFile)]?.length) : false}
               onRecognitionModeChange={setRecognitionMode}
               onAddRegion={(region) => {
@@ -536,11 +612,14 @@ export default function Home() {
             total={visibleTotal}
             isSubmitting={isSubmitting}
             hasFiles={files.length > 0}
+            isTaskLocked={isTaskRunning}
             onSourceLanguageChange={setSourceLanguage}
             onTargetLanguageChange={setTargetLanguage}
             onInpaintEngineChange={setInpaintEngine}
             onStart={() => void startTranslation()}
             onClearQueue={clearQueue}
+            onCancelCurrent={() => void cancelCurrentImage()}
+            onCancelJob={() => void cancelEntireJob()}
           />
         </section>
       )}
@@ -607,6 +686,7 @@ function QueuePanel({
   selectedKey,
   totalSize,
   regionCount,
+  actionsDisabled,
   onAddClick,
   onCopyClick,
   onSelectRow,
@@ -615,6 +695,7 @@ function QueuePanel({
   selectedKey: string;
   totalSize: number;
   regionCount: number;
+  actionsDisabled: boolean;
   onAddClick: () => void;
   onCopyClick: () => void;
   onSelectRow: (row: QueueRow) => void;
@@ -654,11 +735,11 @@ function QueuePanel({
       </div>
 
       <div className="queue-actions">
-        <button className="primary-action" type="button" onClick={onAddClick}>
+        <button className="primary-action" type="button" onClick={onAddClick} disabled={actionsDisabled}>
           <span aria-hidden="true">+</span>
           添加图片
         </button>
-        <button className="secondary-action" type="button" onClick={onCopyClick}>
+        <button className="secondary-action" type="button" onClick={onCopyClick} disabled={actionsDisabled}>
           <CopyIcon />
           复制当前框选到全部图片
         </button>
@@ -674,6 +755,8 @@ function ImageEditorPanel({
   statusText,
   workflowState,
   recognitionMode,
+  isLocked,
+  taskSnapshot,
   canRedo,
   onRecognitionModeChange,
   onAddRegion,
@@ -688,6 +771,8 @@ function ImageEditorPanel({
   statusText: string;
   workflowState: string;
   recognitionMode: RecognitionMode;
+  isLocked: boolean;
+  taskSnapshot: TaskSnapshot | null;
   canRedo: boolean;
   onRecognitionModeChange: (mode: RecognitionMode) => void;
   onAddRegion: (region: ManualRegion) => void;
@@ -722,13 +807,20 @@ function ImageEditorPanel({
   const isManualMode = recognitionMode === "manual";
   const visibleRegions = isManualMode ? regions : [];
   const hasRegions = visibleRegions.length > 0;
-  const selectedRegionExists = isManualMode && selectedRegionIndex >= 0 && selectedRegionIndex < visibleRegions.length;
+  const selectedRegionExists = !isLocked && isManualMode && selectedRegionIndex >= 0 && selectedRegionIndex < visibleRegions.length;
   const zoomPercent = Math.round(zoom * 100);
   const hintText = !filesCount
     ? "当前显示示例图，添加图片后即可框选真实区域"
+    : isLocked && isManualMode
+      ? "处理中 · 手动框选快照 · 选框不可修改"
+    : isLocked
+      ? "处理中 · 自动识别扫描整张图，无需框选区域"
     : isManualMode
       ? "拖拽框选区域，调整大小和位置"
       : "自动识别会扫描整张图，无需框选区域";
+  const taskBadge = isLocked
+    ? `当前任务：${(taskSnapshot?.recognitionMode || recognitionMode) === "manual" ? "手动框选" : "自动识别"}处理中`
+    : `${isManualMode ? "手动框选" : "自动识别"}编辑模式`;
 
   function changeZoom(delta: number) {
     setZoom((currentZoom) => Math.round(clamp(currentZoom + delta, 0.5, 3) * 100) / 100);
@@ -751,7 +843,7 @@ function ImageEditorPanel({
       <ManualImageCanvas
         file={file}
         regions={visibleRegions}
-        readOnly={!isManualMode}
+        readOnly={!isManualMode || isLocked}
         selectedRegionIndex={selectedRegionIndex}
         zoom={zoom}
         expanded={expanded}
@@ -775,6 +867,7 @@ function ImageEditorPanel({
             className={recognitionMode === "auto" ? "active" : ""}
             type="button"
             aria-pressed={recognitionMode === "auto"}
+            disabled={isLocked}
             onClick={() => onRecognitionModeChange("auto")}
           >
             自动识别
@@ -783,16 +876,21 @@ function ImageEditorPanel({
             className={recognitionMode === "manual" ? "active" : ""}
             type="button"
             aria-pressed={recognitionMode === "manual"}
+            disabled={isLocked}
             onClick={() => onRecognitionModeChange("manual")}
           >
             手动框选
           </button>
         </div>
+        <div className={`task-mode-pill${isLocked ? " locked" : ""}`}>
+          <span>{taskBadge}</span>
+          {isLocked ? <small>选区已锁定，只读显示</small> : null}
+        </div>
         <div className="canvas-tools" aria-label="画布工具">
-          <button type="button" onClick={onUndoRegion} disabled={!hasRegions || !isManualMode} title="撤销上一个框选">
+          <button type="button" onClick={onUndoRegion} disabled={isLocked || !hasRegions || !isManualMode} title="撤销上一个框选">
             ↶
           </button>
-          <button type="button" onClick={onRedoRegion} disabled={!canRedo || !isManualMode} title="重做框选">
+          <button type="button" onClick={onRedoRegion} disabled={isLocked || !canRedo || !isManualMode} title="重做框选">
             ↷
           </button>
           <div className="zoom-control" aria-label="缩放">
@@ -959,7 +1057,7 @@ function ManualImageCanvas({
     capturePointerOnFrame(event);
   }
 
-  function handleResizePointerDown(event: ReactPointerEvent<HTMLSpanElement>, index: number) {
+  function handleResizePointerDown(event: ReactPointerEvent<HTMLSpanElement>, index: number, handle: ResizeHandle) {
     if (readOnly || event.button !== 0) {
       return;
     }
@@ -967,7 +1065,7 @@ function ManualImageCanvas({
     event.stopPropagation();
     onSelectRegion(index);
     setDraftRegion(null);
-    setAction({ type: "resize", index, start: normalizedPoint(event), original: regions[index] });
+    setAction({ type: "resize", index, handle, start: normalizedPoint(event), original: regions[index] });
     capturePointerOnFrame(event);
   }
 
@@ -994,13 +1092,7 @@ function ManualImageCanvas({
       return;
     }
 
-    const dx = point.x - action.start.x;
-    const dy = point.y - action.start.y;
-    onChangeRegion(action.index, {
-      ...action.original,
-      width: roundCoordinate(clamp(action.original.width + dx, 0.01, 1 - action.original.x)),
-      height: roundCoordinate(clamp(action.original.height + dy, 0.01, 1 - action.original.y)),
-    });
+    onChangeRegion(action.index, resizeRegionFromHandle(action.original, point.x - action.start.x, point.y - action.start.y, action.handle));
   }
 
   function finishPointer(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1042,7 +1134,7 @@ function ManualImageCanvas({
         const isDraft = index >= regions.length;
         return (
           <span
-            className={`workspace-region${isDraft ? " draft" : ""}${index === selectedRegionIndex ? " selected" : ""}`}
+            className={`workspace-region${isDraft ? " draft" : ""}${readOnly ? " locked" : ""}${index === selectedRegionIndex ? " selected" : ""}`}
             key={`${region.x}-${region.y}-${region.width}-${region.height}-${index}`}
             style={{
               left: `${region.x * 100}%`,
@@ -1053,7 +1145,15 @@ function ManualImageCanvas({
             onPointerDown={isDraft ? undefined : (event) => handleRegionPointerDown(event, index)}
           >
             {!isDraft ? <span className="region-number">{index + 1}</span> : null}
-            {!isDraft ? <span className="region-resize-handle" onPointerDown={(event) => handleResizePointerDown(event, index)} /> : null}
+            {!isDraft && !readOnly
+              ? (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as ResizeHandle[]).map((handle) => (
+                  <span
+                    className={`region-resize-handle ${handle}`}
+                    key={handle}
+                    onPointerDown={(event) => handleResizePointerDown(event, index, handle)}
+                  />
+                ))
+              : null}
           </span>
         );
       })}
@@ -1164,11 +1264,14 @@ function TaskPanel({
   total,
   isSubmitting,
   hasFiles,
+  isTaskLocked,
   onSourceLanguageChange,
   onTargetLanguageChange,
   onInpaintEngineChange,
   onStart,
   onClearQueue,
+  onCancelCurrent,
+  onCancelJob,
 }: {
   rows: QueueRow[];
   sourceLanguage: string;
@@ -1179,11 +1282,14 @@ function TaskPanel({
   total: number;
   isSubmitting: boolean;
   hasFiles: boolean;
+  isTaskLocked: boolean;
   onSourceLanguageChange: (value: string) => void;
   onTargetLanguageChange: (value: string) => void;
   onInpaintEngineChange: (value: InpaintEngine) => void;
   onStart: () => void;
   onClearQueue: () => void;
+  onCancelCurrent: () => void;
+  onCancelJob: () => void;
 }) {
   return (
     <aside className="task-panel">
@@ -1191,13 +1297,13 @@ function TaskPanel({
       <div className="task-controls">
         <label>
           源语言
-          <select value={sourceLanguage} onChange={(event) => onSourceLanguageChange(event.target.value)}>
+          <select value={sourceLanguage} onChange={(event) => onSourceLanguageChange(event.target.value)} disabled={isTaskLocked}>
             <option value="zh">中文</option>
           </select>
         </label>
         <label>
           目标语言
-          <select value={targetLanguage} onChange={(event) => onTargetLanguageChange(event.target.value)}>
+          <select value={targetLanguage} onChange={(event) => onTargetLanguageChange(event.target.value)} disabled={isTaskLocked}>
             <option value="en">英文</option>
             <option value="ja">日文</option>
             <option value="ko">韩文</option>
@@ -1207,7 +1313,7 @@ function TaskPanel({
         </label>
         <label>
           擦除模式
-          <select value={inpaintEngine} onChange={(event) => onInpaintEngineChange(event.target.value as InpaintEngine)}>
+          <select value={inpaintEngine} onChange={(event) => onInpaintEngineChange(event.target.value as InpaintEngine)} disabled={isTaskLocked}>
             <option value="lama">高清 LAMA 擦除</option>
             <option value="opencv">快速 OpenCV 擦除</option>
           </select>
@@ -1220,9 +1326,20 @@ function TaskPanel({
         </label>
       </div>
 
-      <button className="task-start-button" type="button" onClick={onStart} disabled={isSubmitting || !hasFiles}>
+      <button className="task-start-button" type="button" onClick={onStart} disabled={isTaskLocked || isSubmitting || !hasFiles}>
         {isSubmitting ? "处理中..." : "开始批量翻译"}
       </button>
+
+      {isTaskLocked ? (
+        <div className="task-cancel-actions">
+          <button className="secondary-action cancel-current-action" type="button" onClick={onCancelCurrent}>
+            取消当前图并继续队列
+          </button>
+          <button className="danger-action cancel-job-action" type="button" onClick={onCancelJob}>
+            取消整批任务
+          </button>
+        </div>
+      ) : null}
 
       <div className="task-progress-head">
         <h3>总体进度</h3>
@@ -1253,7 +1370,7 @@ function TaskPanel({
         ))}
       </div>
 
-      <button className="danger-action" type="button" onClick={onClearQueue}>
+      <button className="danger-action" type="button" onClick={onClearQueue} disabled={isTaskLocked}>
         <TrashIcon />
         清空队列
       </button>
@@ -1311,7 +1428,7 @@ function StatusBadge({ status }: { status: QueueStatus }) {
   return (
     <span className={`status-badge ${status}`}>
       {STATUS_LABELS[status]}
-      <span aria-hidden="true">{status === "completed" ? "✓" : status === "failed" ? "!" : status === "processing" ? "◌" : "○"}</span>
+      <span aria-hidden="true">{status === "completed" ? "✓" : status === "failed" ? "!" : status === "canceled" ? "−" : status === "processing" ? "◌" : "○"}</span>
     </span>
   );
 }
@@ -1323,10 +1440,35 @@ function taskStateText(row: QueueRow) {
   if (row.status === "queued") {
     return "排队";
   }
+  if (row.status === "canceled") {
+    return "已取消";
+  }
   return STATUS_LABELS[row.status];
 }
 
 function buildQueueRows(files: File[], job: TranslationJob | null): QueueRow[] {
+  if (job?.items?.length) {
+    return files.map((file, index) => {
+      const item = job.items[index];
+      const itemStatus = normalizeQueueStatus(item?.status || "queued");
+      const itemProgress =
+        itemStatus === "completed"
+          ? 100
+          : itemStatus === "processing"
+            ? Math.max(8, Math.min(95, Math.round(Number(job.progress || 0))))
+            : 0;
+      return {
+        id: fileKey(file),
+        index: index + 1,
+        name: item?.source_filename || file.name,
+        sizeLabel: formatBytes(file.size),
+        status: itemStatus,
+        progress: itemProgress,
+        file,
+      };
+    });
+  }
+
   const completedNames = new Set(job?.results?.map((item) => item.source_filename).filter(Boolean));
   const completedCount = Math.max(0, Number(job?.completed || 0));
 
@@ -1358,6 +1500,13 @@ function buildQueueRows(files: File[], job: TranslationJob | null): QueueRow[] {
   });
 }
 
+function normalizeQueueStatus(status: string): QueueStatus {
+  if (status === "completed" || status === "processing" || status === "failed" || status === "canceled") {
+    return status;
+  }
+  return "queued";
+}
+
 function renderJobState(
   job: TranslationJob,
   setWorkflowState: (value: string) => void,
@@ -1371,6 +1520,8 @@ function renderJobState(
   setStatusText(
     job.status === "failed"
       ? `处理失败：${job.error || "未知错误"}`
+      : job.status === "canceled"
+        ? "任务已取消。"
       : job.status === "partial"
         ? `部分完成：${job.completed}/${job.total} 张成功，失败项可重跑或下载已生成结果。`
       : `${statusLabel} · ${job.completed}/${job.total} 张 · ${Math.round(nextProgress)}%`,
@@ -1406,6 +1557,34 @@ function regionFromPoints(start: { x: number; y: number }, end: { x: number; y: 
     width: Math.abs(end.x - start.x),
     height: Math.abs(end.y - start.y),
   };
+}
+
+function resizeRegionFromHandle(region: ManualRegion, dx: number, dy: number, handle: ResizeHandle): ManualRegion {
+  const minSize = 0.01;
+  let left = region.x;
+  let top = region.y;
+  let right = region.x + region.width;
+  let bottom = region.y + region.height;
+
+  if (handle.includes("w")) {
+    left = clamp(region.x + dx, 0, right - minSize);
+  }
+  if (handle.includes("e")) {
+    right = clamp(region.x + region.width + dx, left + minSize, 1);
+  }
+  if (handle.includes("n")) {
+    top = clamp(region.y + dy, 0, bottom - minSize);
+  }
+  if (handle.includes("s")) {
+    bottom = clamp(region.y + region.height + dy, top + minSize, 1);
+  }
+
+  return roundRegion({
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  });
 }
 
 function roundRegion(region: ManualRegion): ManualRegion {

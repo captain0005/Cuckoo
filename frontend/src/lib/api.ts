@@ -15,14 +15,31 @@ export type JobResult = {
   warnings: string[];
 };
 
+export type JobItem = {
+  id: number;
+  index: number;
+  source_filename: string;
+  output_filename: string;
+  file_url: string;
+  status: "queued" | "processing" | "completed" | "failed" | "canceled" | string;
+  manual_regions: ManualRegion[];
+  error: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
 export type TranslationJob = {
   job_id: string;
   user_id: string;
   username: string;
-  status: "queued" | "processing" | "completed" | "failed" | string;
+  status: "queued" | "processing" | "completed" | "failed" | "partial" | "canceled" | string;
   progress: number;
+  recognition_mode: "auto" | "manual" | string;
+  inpaint_engine: string;
+  processed: number;
   completed: number;
   total: number;
+  current_item_index: number;
   source_language: string;
   target_language: string;
   regions_detected: number;
@@ -34,6 +51,7 @@ export type TranslationJob = {
   updated_at: string;
   download_url: string | null;
   results: JobResult[];
+  items: JobItem[];
 };
 
 export type ManualRegion = {
@@ -139,13 +157,14 @@ export async function createJob(
   files: File[],
   sourceLanguage: string,
   targetLanguage: string,
-  options: { token: string; manualRegions?: ManualRegion[][]; inpaintEngine?: string },
+  options: { token: string; manualRegions?: ManualRegion[][]; inpaintEngine?: string; recognitionMode?: "auto" | "manual" },
 ) {
   const payload = new FormData();
   files.forEach((file) => payload.append("files", file));
   payload.append("source_language", sourceLanguage);
   payload.append("target_language", targetLanguage);
   payload.append("inpaint_engine", options.inpaintEngine || "lama");
+  payload.append("recognition_mode", options.recognitionMode || "auto");
   if (options.manualRegions?.some((regions) => regions.length > 0)) {
     payload.append("manual_regions", JSON.stringify(options.manualRegions));
   }
@@ -154,6 +173,22 @@ export async function createJob(
     method: "POST",
     headers: bearerHeaders(options.token),
     body: payload,
+  });
+  return parseResponse<TranslationJob>(response);
+}
+
+export async function cancelCurrentJobItem(jobID: string, token: string) {
+  const response = await fetch(apiURL(`/api/jobs/${jobID}/cancel-current`), {
+    method: "POST",
+    headers: authHeaders(token),
+  });
+  return parseResponse<TranslationJob>(response);
+}
+
+export async function cancelJob(jobID: string, token: string) {
+  const response = await fetch(apiURL(`/api/jobs/${jobID}/cancel`), {
+    method: "POST",
+    headers: authHeaders(token),
   });
   return parseResponse<TranslationJob>(response);
 }

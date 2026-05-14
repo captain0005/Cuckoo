@@ -1601,6 +1601,12 @@ select {
   color: #ef4444;
 }
 
+.status-badge.canceled {
+  border: 1px solid #cbd5e1;
+  background: #f4f7fb;
+  color: #64748b;
+}
+
 .queue-summary {
   display: flex;
   justify-content: space-between;
@@ -1656,6 +1662,16 @@ select {
   font-size: 16px;
 }
 
+.primary-action:disabled,
+.secondary-action:disabled,
+.danger-action:disabled,
+.task-start-button:disabled,
+.segmented-control button:disabled,
+.batch-app select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .workspace-main {
   min-width: 0;
   display: grid;
@@ -1676,6 +1692,33 @@ select {
   justify-content: space-between;
   gap: 18px;
   margin-bottom: 14px;
+}
+
+.task-mode-pill {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #d9e2ee;
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 0 14px;
+  color: #314258;
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.task-mode-pill.locked {
+  border-color: rgba(7, 146, 139, 0.26);
+  background: #edfafa;
+  color: #078f8a;
+}
+
+.task-mode-pill small {
+  color: #697a91;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .segmented-control {
@@ -1874,8 +1917,6 @@ select {
   outline: 1px solid rgba(7, 155, 150, 0.28);
 }
 
-.workspace-region::before,
-.workspace-region::after,
 .demo-region::before,
 .demo-region::after {
   content: "";
@@ -1886,13 +1927,11 @@ select {
   background: #d9fffb;
 }
 
-.workspace-region::before,
 .demo-region::before {
   left: -7px;
   top: -7px;
 }
 
-.workspace-region::after,
 .demo-region::after {
   right: -7px;
   top: -7px;
@@ -1901,6 +1940,12 @@ select {
 .workspace-region.draft {
   border-style: dashed;
   background: rgba(34, 130, 255, 0.12);
+}
+
+.workspace-region.locked {
+  border-color: #7aa9a6;
+  background: rgba(16, 167, 159, 0.1);
+  cursor: default;
 }
 
 .region-number {
@@ -1921,25 +1966,62 @@ select {
 
 .region-resize-handle {
   position: absolute;
-  right: -7px;
-  bottom: -7px;
   width: 13px;
   height: 13px;
   border: 2px solid #079b96;
   background: #d9fffb;
+}
+
+.region-resize-handle.nw {
+  left: -7px;
+  top: -7px;
   cursor: nwse-resize;
 }
 
-.workspace-region > .region-resize-handle::before {
-  content: "";
-  position: absolute;
-  left: -1px;
-  top: -1px;
-  width: 11px;
-  height: 11px;
-  border: 2px solid #079b96;
-  background: #d9fffb;
-  transform: translate(-100%, 0);
+.region-resize-handle.n {
+  left: 50%;
+  top: -7px;
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+
+.region-resize-handle.ne {
+  right: -7px;
+  top: -7px;
+  cursor: nesw-resize;
+}
+
+.region-resize-handle.e {
+  right: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+
+.region-resize-handle.se {
+  right: -7px;
+  bottom: -7px;
+  cursor: nwse-resize;
+}
+
+.region-resize-handle.s {
+  left: 50%;
+  bottom: -7px;
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+
+.region-resize-handle.sw {
+  left: -7px;
+  bottom: -7px;
+  cursor: nesw-resize;
+}
+
+.region-resize-handle.w {
+  left: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: ew-resize;
 }
 
 .canvas-hint-row {
@@ -2207,6 +2289,24 @@ select {
   font-size: 16px;
 }
 
+.task-cancel-actions {
+  display: grid;
+  gap: 10px;
+  margin: -6px 0 22px;
+}
+
+.task-cancel-actions .secondary-action,
+.task-cancel-actions .danger-action {
+  min-height: 46px;
+  margin-top: 0;
+  font-size: 15px;
+}
+
+.cancel-current-action {
+  border-color: #0a9b94;
+  color: #078f8a;
+}
+
 .task-progress-head {
   margin-top: 6px;
 }
@@ -2291,6 +2391,10 @@ select {
 
 .task-state.failed {
   color: #ef4444;
+}
+
+.task-state.canceled {
+  color: #64748b;
 }
 
 .mini-progress {

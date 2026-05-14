@@ -26,6 +26,8 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	auth.GET("/jobs", h.ListJobs)
 	auth.POST("/jobs", h.CreateJob)
 	auth.GET("/jobs/:jobID", h.GetJob)
+	auth.POST("/jobs/:jobID/cancel-current", h.CancelCurrentJobItem)
+	auth.POST("/jobs/:jobID/cancel", h.CancelJob)
 	auth.GET("/jobs/:jobID/download", h.DownloadJob)
 	auth.POST("/jobs/:jobID/export-folder", h.ExportJobToFolder)
 
@@ -94,6 +96,9 @@ func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) stri
 	if isCuckooVercelOrigin(requestOrigin) {
 		return requestOrigin
 	}
+	if isLocalDevOrigin(requestOrigin) {
+		return requestOrigin
+	}
 	for _, allowedOrigin := range allowedOrigins {
 		if allowedOrigin == "*" {
 			return "*"
@@ -122,4 +127,19 @@ func isCuckooVercelOrigin(requestOrigin string) bool {
 	host := strings.ToLower(parsed.Hostname())
 	return host == "cuckoo-black.vercel.app" ||
 		(strings.HasPrefix(host, "cuckoo-") && strings.HasSuffix(host, ".vercel.app"))
+}
+
+func isLocalDevOrigin(requestOrigin string) bool {
+	if strings.TrimSpace(requestOrigin) == "" {
+		return false
+	}
+	parsed, err := url.Parse(requestOrigin)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }

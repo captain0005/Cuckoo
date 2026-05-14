@@ -11,6 +11,7 @@ const (
 	StatusCompleted  = "completed"
 	StatusPartial    = "partial"
 	StatusFailed     = "failed"
+	StatusCanceled   = "canceled"
 )
 
 const (
@@ -28,9 +29,12 @@ type Job struct {
 	ID                   string `gorm:"primaryKey"`
 	UserID               string `gorm:"index"`
 	Status               string `gorm:"index"`
+	RecognitionMode      string
 	SourceLanguage       string
 	TargetLanguage       string
+	InpaintEngine        string
 	Total                int
+	Processed            int
 	Completed            int
 	RegionsDetected      int
 	RegionsReplaced      int
@@ -41,6 +45,24 @@ type Job struct {
 	UpdatedAt            time.Time
 	User                 User        `gorm:"foreignKey:UserID"`
 	Results              []JobResult `gorm:"foreignKey:JobID;constraint:OnDelete:CASCADE"`
+	Items                []JobItem   `gorm:"foreignKey:JobID;constraint:OnDelete:CASCADE"`
+}
+
+type JobItem struct {
+	ID                uint `gorm:"primaryKey"`
+	JobID             string
+	ItemIndex         int
+	SourceFilename    string
+	InputPath         string
+	OutputPath        string
+	OutputFilename    string
+	Status            string `gorm:"index"`
+	ManualRegionsJSON string `gorm:"type:text"`
+	ErrorMessage      string
+	StartedAt         *time.Time
+	FinishedAt        *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type User struct {
@@ -146,14 +168,38 @@ type JobResultResponse struct {
 	Warnings        []string           `json:"warnings"`
 }
 
+type ManualRegion struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+type JobItemResponse struct {
+	ID             uint           `json:"id"`
+	Index          int            `json:"index"`
+	SourceFilename string         `json:"source_filename"`
+	OutputFilename string         `json:"output_filename"`
+	FileURL        string         `json:"file_url"`
+	Status         string         `json:"status"`
+	ManualRegions  []ManualRegion `json:"manual_regions"`
+	Error          string         `json:"error"`
+	StartedAt      *time.Time     `json:"started_at"`
+	FinishedAt     *time.Time     `json:"finished_at"`
+}
+
 type JobResponse struct {
 	JobID                string              `json:"job_id"`
 	UserID               string              `json:"user_id"`
 	Username             string              `json:"username"`
 	Status               string              `json:"status"`
 	Progress             float64             `json:"progress"`
+	RecognitionMode      string              `json:"recognition_mode"`
+	InpaintEngine        string              `json:"inpaint_engine"`
+	Processed            int                 `json:"processed"`
 	Completed            int                 `json:"completed"`
 	Total                int                 `json:"total"`
+	CurrentItemIndex     int                 `json:"current_item_index"`
 	SourceLanguage       string              `json:"source_language"`
 	TargetLanguage       string              `json:"target_language"`
 	RegionsDetected      int                 `json:"regions_detected"`
@@ -165,6 +211,7 @@ type JobResponse struct {
 	UpdatedAt            time.Time           `json:"updated_at"`
 	DownloadURL          *string             `json:"download_url"`
 	Results              []JobResultResponse `json:"results"`
+	Items                []JobItemResponse   `json:"items"`
 }
 
 func (u User) ToResponse() UserResponse {
@@ -211,15 +258,46 @@ func (r JobResult) ToResponse(fileURL string) JobResultResponse {
 	}
 }
 
+func (item JobItem) ToResponse(fileURL func(jobID, filename string) string) JobItemResponse {
+	itemFileURL := ""
+	if item.OutputFilename != "" && item.Status == StatusCompleted {
+		itemFileURL = fileURL(item.JobID, item.OutputFilename)
+	}
+	return JobItemResponse{
+		ID:             item.ID,
+		Index:          item.ItemIndex,
+		SourceFilename: item.SourceFilename,
+		OutputFilename: item.OutputFilename,
+		FileURL:        itemFileURL,
+		Status:         item.Status,
+		ManualRegions:  decodeManualRegions(item.ManualRegionsJSON),
+		Error:          item.ErrorMessage,
+		StartedAt:      item.StartedAt,
+		FinishedAt:     item.FinishedAt,
+	}
+}
+
 func (j Job) ToResponse(fileURL func(jobID, filename string) string) JobResponse {
+	processed := j.Processed
+	if processed == 0 && len(j.Items) == 0 {
+		processed = j.Completed
+	}
 	progress := 0.0
 	if j.Total > 0 {
-		progress = float64(j.Completed) / float64(j.Total) * 100
+		progress = float64(processed) / float64(j.Total) * 100
 	}
 	var downloadURL *string
 	if j.Status == StatusCompleted || j.Status == StatusPartial {
 		value := "/api/jobs/" + j.ID + "/download"
 		downloadURL = &value
+	}
+	currentItemIndex := 0
+	items := make([]JobItemResponse, 0, len(j.Items))
+	for _, item := range j.Items {
+		if item.Status == StatusProcessing {
+			currentItemIndex = item.ItemIndex
+		}
+		items = append(items, item.ToResponse(fileURL))
 	}
 	results := make([]JobResultResponse, 0, len(j.Results))
 	for _, result := range j.Results {
@@ -231,8 +309,12 @@ func (j Job) ToResponse(fileURL func(jobID, filename string) string) JobResponse
 		Username:             j.User.Username,
 		Status:               j.Status,
 		Progress:             progress,
+		RecognitionMode:      j.RecognitionMode,
+		InpaintEngine:        j.InpaintEngine,
+		Processed:            processed,
 		Completed:            j.Completed,
 		Total:                j.Total,
+		CurrentItemIndex:     currentItemIndex,
 		SourceLanguage:       j.SourceLanguage,
 		TargetLanguage:       j.TargetLanguage,
 		RegionsDetected:      j.RegionsDetected,
@@ -244,6 +326,7 @@ func (j Job) ToResponse(fileURL func(jobID, filename string) string) JobResponse
 		UpdatedAt:            j.UpdatedAt,
 		DownloadURL:          downloadURL,
 		Results:              results,
+		Items:                items,
 	}
 }
 
@@ -267,6 +350,14 @@ func decodeStrings(raw string) []string {
 	var items []string
 	if err := json.Unmarshal([]byte(raw), &items); err != nil {
 		return []string{}
+	}
+	return items
+}
+
+func decodeManualRegions(raw string) []ManualRegion {
+	var items []ManualRegion
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return []ManualRegion{}
 	}
 	return items
 }

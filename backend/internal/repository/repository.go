@@ -23,6 +23,9 @@ type Repository struct {
 	db *gorm.DB
 }
 
+var ErrNoCancelableItem = errors.New("no queued or processing item")
+var ErrItemNotProcessable = errors.New("job item is not processing")
+
 func Open(cfg config.Config) (*Repository, error) {
 	repo, err := openDatabase(cfg.DatabaseDriver, cfg.DatabaseDSN)
 	if err == nil {
@@ -55,7 +58,7 @@ func openDatabase(driver, dsn string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.AutoMigrate(&models.Job{}, &models.JobResult{}, &models.User{}, &models.APIKeyRecord{}); err != nil {
+	if err := db.AutoMigrate(&models.Job{}, &models.JobItem{}, &models.JobResult{}, &models.User{}, &models.APIKeyRecord{}); err != nil {
 		return nil, err
 	}
 	repo := &Repository{db: db}
@@ -69,9 +72,26 @@ func (r *Repository) CreateJob(job *models.Job) error {
 	return r.db.Create(job).Error
 }
 
+func (r *Repository) CreateJobWithItems(job *models.Job, items *[]models.JobItem) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(job).Error; err != nil {
+			return err
+		}
+		if items != nil && len(*items) > 0 {
+			if err := tx.Create(items).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (r *Repository) GetJob(jobID string) (*models.Job, error) {
 	var job models.Job
-	if err := r.db.Preload("User").Preload("Results").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := r.db.Preload("User").
+		Preload("Results").
+		Preload("Items", func(db *gorm.DB) *gorm.DB { return db.Order("item_index asc") }).
+		First(&job, "id = ?", jobID).Error; err != nil {
 		return nil, err
 	}
 	return &job, nil
@@ -81,7 +101,11 @@ func (r *Repository) ListJobs(userID string, limit int) ([]models.Job, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	query := r.db.Preload("User").Preload("Results").Order("created_at desc").Limit(limit)
+	query := r.db.Preload("User").
+		Preload("Results").
+		Preload("Items", func(db *gorm.DB) *gorm.DB { return db.Order("item_index asc") }).
+		Order("created_at desc").
+		Limit(limit)
 	if strings.TrimSpace(userID) != "" {
 		query = query.Where("user_id = ?", strings.TrimSpace(userID))
 	}
@@ -98,13 +122,67 @@ func (r *Repository) SetJobStatus(jobID, status, errorMessage string) error {
 	return r.db.Model(&models.Job{}).Where("id = ?", jobID).Updates(updates).Error
 }
 
-func (r *Repository) AddResult(jobID string, result models.JobResult, sourceCharacters, translatedCharacters int) error {
+func (r *Repository) GetJobItem(itemID uint) (*models.JobItem, error) {
+	var item models.JobItem
+	if err := r.db.First(&item, "id = ?", itemID).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *Repository) SetItemProcessing(itemID uint) (bool, error) {
+	now := time.Now()
+	result := r.db.Model(&models.JobItem{}).
+		Where("id = ? AND status = ?", itemID, models.StatusQueued).
+		Updates(map[string]any{
+			"status":     models.StatusProcessing,
+			"started_at": &now,
+		})
+	return result.RowsAffected == 1, result.Error
+}
+
+func (r *Repository) MarkItemFailed(jobID string, itemID uint, errorMessage string) error {
+	now := time.Now()
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.JobItem{}).
+			Where("id = ? AND status = ?", itemID, models.StatusProcessing).
+			Updates(map[string]any{
+				"status":        models.StatusFailed,
+				"error_message": errorMessage,
+				"finished_at":   &now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		return tx.Model(&models.Job{}).Where("id = ?", jobID).
+			UpdateColumn("processed", gorm.Expr("processed + ?", 1)).Error
+	})
+}
+
+func (r *Repository) AddResult(jobID string, itemID uint, result models.JobResult, sourceCharacters, translatedCharacters int) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		itemUpdate := tx.Model(&models.JobItem{}).
+			Where("id = ? AND status = ?", itemID, models.StatusProcessing).
+			Updates(map[string]any{
+				"status":      models.StatusCompleted,
+				"finished_at": &now,
+			})
+		if itemUpdate.Error != nil {
+			return itemUpdate.Error
+		}
+		if itemUpdate.RowsAffected == 0 {
+			return ErrItemNotProcessable
+		}
 		if err := tx.Create(&result).Error; err != nil {
 			return err
 		}
 		return tx.Model(&models.Job{}).Where("id = ?", jobID).
 			Updates(map[string]any{
+				"processed":             gorm.Expr("processed + ?", 1),
 				"completed":             gorm.Expr("completed + ?", 1),
 				"regions_detected":      gorm.Expr("regions_detected + ?", result.RegionsDetected),
 				"regions_replaced":      gorm.Expr("regions_replaced + ?", result.RegionsReplaced),
@@ -117,6 +195,7 @@ func (r *Repository) AddResult(jobID string, result models.JobResult, sourceChar
 func (r *Repository) CompleteJob(jobID string) error {
 	return r.db.Model(&models.Job{}).Where("id = ?", jobID).Updates(map[string]any{
 		"status":    models.StatusCompleted,
+		"processed": gorm.Expr("total"),
 		"completed": gorm.Expr("total"),
 	}).Error
 }
@@ -127,6 +206,137 @@ func (r *Repository) FinishJob(jobID, status, errorMessage string) error {
 		updates["error_message"] = errorMessage
 	}
 	return r.db.Model(&models.Job{}).Where("id = ?", jobID).Updates(updates).Error
+}
+
+func (r *Repository) CancelCurrentItem(jobID string) (*models.JobItem, error) {
+	var item models.JobItem
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("job_id = ? AND status IN ?", jobID, []string{models.StatusProcessing, models.StatusQueued}).
+			Order("CASE WHEN status = 'processing' THEN 0 ELSE 1 END, item_index asc").
+			First(&item).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNoCancelableItem
+			}
+			return err
+		}
+		now := time.Now()
+		result := tx.Model(&models.JobItem{}).
+			Where("id = ? AND status IN ?", item.ID, []string{models.StatusProcessing, models.StatusQueued}).
+			Updates(map[string]any{
+				"status":        models.StatusCanceled,
+				"error_message": "用户取消当前图片",
+				"finished_at":   &now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNoCancelableItem
+		}
+		return tx.Model(&models.Job{}).Where("id = ?", jobID).
+			UpdateColumn("processed", gorm.Expr("processed + ?", 1)).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	item.Status = models.StatusCanceled
+	return &item, nil
+}
+
+func (r *Repository) CancelJob(jobID string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&models.JobItem{}).
+			Where("job_id = ? AND status IN ?", jobID, []string{models.StatusQueued, models.StatusProcessing}).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		now := time.Now()
+		if count > 0 {
+			if err := tx.Model(&models.JobItem{}).
+				Where("job_id = ? AND status IN ?", jobID, []string{models.StatusQueued, models.StatusProcessing}).
+				Updates(map[string]any{
+					"status":        models.StatusCanceled,
+					"error_message": "用户取消整批任务",
+					"finished_at":   &now,
+				}).Error; err != nil {
+				return err
+			}
+		}
+		updates := map[string]any{"status": models.StatusCanceled}
+		if count > 0 {
+			updates["processed"] = gorm.Expr("processed + ?", count)
+		}
+		return tx.Model(&models.Job{}).Where("id = ?", jobID).Updates(updates).Error
+	})
+}
+
+func (r *Repository) JobStatus(jobID string) (string, error) {
+	var job models.Job
+	if err := r.db.Select("status").First(&job, "id = ?", jobID).Error; err != nil {
+		return "", err
+	}
+	return job.Status, nil
+}
+
+func (r *Repository) FinalizeJobFromItems(jobID string) error {
+	var items []models.JobItem
+	if err := r.db.Where("job_id = ?", jobID).Find(&items).Error; err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return r.CompleteJob(jobID)
+	}
+
+	completed := 0
+	failed := 0
+	canceled := 0
+	messages := make([]string, 0)
+	for _, item := range items {
+		switch item.Status {
+		case models.StatusCompleted:
+			completed++
+		case models.StatusFailed:
+			failed++
+			if strings.TrimSpace(item.ErrorMessage) != "" {
+				messages = append(messages, item.SourceFilename+": "+item.ErrorMessage)
+			}
+		case models.StatusCanceled:
+			canceled++
+		}
+	}
+
+	status := models.StatusCompleted
+	errorMessage := ""
+	switch {
+	case canceled == len(items) && completed == 0 && failed == 0:
+		status = models.StatusCanceled
+		errorMessage = "任务已取消"
+	case failed > 0 || canceled > 0:
+		if completed > 0 {
+			status = models.StatusPartial
+		} else if failed > 0 {
+			status = models.StatusFailed
+		} else {
+			status = models.StatusCanceled
+		}
+		errorMessage = strings.Join(messages, "; ")
+		if canceled > 0 {
+			if errorMessage != "" {
+				errorMessage += "; "
+			}
+			errorMessage += "部分图片已取消"
+		}
+	default:
+		status = models.StatusCompleted
+	}
+
+	return r.db.Model(&models.Job{}).Where("id = ?", jobID).Updates(map[string]any{
+		"status":        status,
+		"processed":     len(items),
+		"completed":     completed,
+		"error_message": errorMessage,
+	}).Error
 }
 
 func (r *Repository) SeedAdminData() error {
