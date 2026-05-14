@@ -12,7 +12,7 @@ import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 from app.config import settings
-from app.inpainting import lama_model_available
+from app.inpainting import lama_model_available, lama_runtime_status
 from app.pipeline import ImageTranslationPipeline, ManualRegion
 
 app = FastAPI(title=f"{settings.app_name} AI Service", version="0.2.0")
@@ -28,6 +28,7 @@ async def health():
         "translator_provider": settings.translator_provider,
         "inpaint_engine": settings.inpaint_engine,
         "lama_model_available": lama_model_available(),
+        "lama": lama_runtime_status(),
     }
 
 

@@ -9,10 +9,12 @@ from app.image_renderer import (
     _erase_box,
     _estimate_text_color,
     _fit_text,
+    _inpaint_layouts,
     _inpaint_masked_area_with_lama,
     _plan_text_layouts,
     _text_content_bounds,
 )
+from app.config import settings
 from app.ocr import TextRegion
 
 
@@ -584,6 +586,33 @@ class ImageRendererTest(unittest.TestCase):
         self.assertEqual(result.size, image.size)
         self.assertLess(seen["crop_size"][0] * seen["crop_size"][1], image.width * image.height)
         self.assertEqual(seen["mask_shape"], (104, 114))
+
+    def test_lama_runtime_limit_falls_back_without_failing_render(self):
+        old_max_pixels = settings.lama_max_pixels
+        old_min_available_mb = settings.lama_min_available_mb
+        settings.lama_max_pixels = 1
+        settings.lama_min_available_mb = 0
+        try:
+            image = Image.new("RGB", (220, 120), "white")
+            region = TextRegion(
+                text="\u4ea7\u54c1\u53c2\u6570",
+                confidence=0.99,
+                x=20,
+                y=20,
+                width=100,
+                height=28,
+                polygon=[(20, 20), (120, 20), (120, 48), (20, 48)],
+            )
+            layouts = _plan_text_layouts(image, [TextReplacement(region=region, translated_text="Product Parameters")])
+            warnings: list[str] = []
+
+            result = _inpaint_layouts(image, layouts, engine="lama", warnings=warnings)
+
+            self.assertEqual(result.size, image.size)
+            self.assertTrue(any("LAMA inpainting unavailable" in warning for warning in warnings))
+        finally:
+            settings.lama_max_pixels = old_max_pixels
+            settings.lama_min_available_mb = old_min_available_mb
 
 
 if __name__ == "__main__":
