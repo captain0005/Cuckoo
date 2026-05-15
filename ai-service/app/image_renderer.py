@@ -16,6 +16,7 @@ class TextReplacement:
     region: TextRegion
     translated_text: str
     force: bool = False
+    erase_regions: list[TextRegion] | None = None
 
 
 @dataclass(slots=True)
@@ -412,6 +413,21 @@ def _inpaint_masked_area_with_lama(image: Image.Image, mask: np.ndarray) -> Imag
     if bounds is None:
         return image.copy()
 
+    if _should_split_lama_mask(image, bounds, mask):
+        components = _mask_component_bounds(mask)
+        if 1 < len(components) <= 14:
+            repaired = image.copy()
+            for component_bounds in components:
+                component_mask = np.zeros_like(mask)
+                left, top, right, bottom = component_bounds
+                component_mask[top:bottom, left:right] = mask[top:bottom, left:right]
+                repaired = _inpaint_single_lama_bounds(repaired, component_mask, component_bounds)
+            return repaired
+
+    return _inpaint_single_lama_bounds(image, mask, bounds)
+
+
+def _inpaint_single_lama_bounds(image: Image.Image, mask: np.ndarray, bounds: tuple[int, int, int, int]) -> Image.Image:
     left, top, right, bottom = bounds
     width = right - left
     height = bottom - top
@@ -438,6 +454,35 @@ def _inpaint_masked_area_with_lama(image: Image.Image, mask: np.ndarray) -> Imag
     return repaired
 
 
+def _should_split_lama_mask(image: Image.Image, bounds: tuple[int, int, int, int], mask: np.ndarray) -> bool:
+    left, top, right, bottom = bounds
+    width = right - left
+    height = bottom - top
+    crop_area = width * height
+    image_area = image.width * image.height
+    configured_limit = max(0, int(settings.lama_max_pixels or 0))
+    if configured_limit > 0 and crop_area > configured_limit:
+        return True
+    return crop_area >= image_area * 0.45 and np.count_nonzero(mask) < crop_area * 0.25
+
+
+def _mask_component_bounds(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        bounds = _mask_bounds(mask)
+        return [bounds] if bounds else []
+
+    component_count, _, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    bounds: list[tuple[int, int, int, int]] = []
+    for index in range(1, component_count):
+        x, y, width, height, area = stats[index]
+        if int(area) <= 0:
+            continue
+        bounds.append((int(x), int(y), int(x + width), int(y + height)))
+    return sorted(bounds, key=lambda item: (item[1], item[0]))
+
+
 def _mask_bounds(mask: np.ndarray) -> tuple[int, int, int, int] | None:
     ys, xs = np.where(mask > 0)
     if xs.size == 0 or ys.size == 0:
@@ -448,8 +493,8 @@ def _mask_bounds(mask: np.ndarray) -> tuple[int, int, int, int] | None:
 def _build_inpaint_mask(image: Image.Image, layouts: list[TextLayout]) -> np.ndarray:
     mask = np.zeros((image.height, image.width), dtype=np.uint8)
     for layout in layouts:
-        x, y, width, height = _erase_box(layout.replacement.region, image.size, layout.role)
-        mask[y : y + height, x : x + width] = 255
+        for x, y, width, height in _erase_boxes_for_layout(layout, image.size):
+            mask[y : y + height, x : x + width] = 255
     return mask
 
 
@@ -462,17 +507,14 @@ def _refill_flat_regions(
     draw = ImageDraw.Draw(result)
     for layout in layouts:
         if layout.role in TABLE_ROLES:
-            _fill_table_region_with_local_background(
-                result,
-                source,
-                _erase_box(layout.replacement.region, source.size, layout.role),
-            )
+            for rect in _erase_boxes_for_layout(layout, source.size):
+                _fill_table_region_with_local_background(result, source, rect)
             continue
         if layout.role not in {"label", "feature_bar", "tag"}:
             continue
-        x, y, width, height = _erase_box(layout.replacement.region, source.size, layout.role)
-        color = _estimate_background_color(source.crop((x, y, x + width, y + height)))
-        draw.rectangle((x, y, x + width, y + height), fill=color)
+        for x, y, width, height in _erase_boxes_for_layout(layout, source.size):
+            color = _estimate_background_color(source.crop((x, y, x + width, y + height)))
+            draw.rectangle((x, y, x + width, y + height), fill=color)
     return result
 
 
@@ -523,10 +565,16 @@ def _fill_layout_regions_with_background(image: Image.Image, layouts: list[TextL
     result = image.copy()
     draw = ImageDraw.Draw(result)
     for layout in layouts:
-        x, y, width, height = _erase_box(layout.replacement.region, image.size, layout.role)
-        color = _estimate_background_color(image.crop((x, y, x + width, y + height)))
-        draw.rectangle((x, y, x + width, y + height), fill=color)
+        for x, y, width, height in _erase_boxes_for_layout(layout, image.size):
+            color = _estimate_background_color(image.crop((x, y, x + width, y + height)))
+            draw.rectangle((x, y, x + width, y + height), fill=color)
     return result
+
+
+def _erase_boxes_for_layout(layout: TextLayout, image_size: tuple[int, int]) -> list[tuple[int, int, int, int]]:
+    erase_regions = layout.replacement.erase_regions or [layout.replacement.region]
+    role = "manual" if layout.replacement.erase_regions else layout.role
+    return [_erase_box(region, image_size, role) for region in erase_regions]
 
 
 def _expanded_box(region: TextRegion, image_size: tuple[int, int]) -> tuple[int, int, int, int]:

@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 
 from app.image_renderer import (
     TextReplacement,
+    _build_inpaint_mask,
     _erase_box,
     _estimate_text_color,
     _fit_text,
@@ -586,6 +587,31 @@ class ImageRendererTest(unittest.TestCase):
         self.assertEqual(result.size, image.size)
         self.assertLess(seen["crop_size"][0] * seen["crop_size"][1], image.width * image.height)
         self.assertEqual(seen["mask_shape"], (104, 114))
+
+    def test_manual_group_erases_ocr_boxes_not_entire_manual_selection(self):
+        image = Image.new("RGB", (400, 240), "white")
+        source_regions = [
+            TextRegion("实力", 0.99, 80, 80, 70, 30, [(80, 80), (150, 80), (150, 110), (80, 110)]),
+            TextRegion("源头", 0.98, 82, 118, 70, 30, [(82, 118), (152, 118), (152, 148), (82, 148)]),
+        ]
+        manual_region = TextRegion("实力 源头", 0.98, 60, 60, 180, 130, [(60, 60), (240, 60), (240, 190), (60, 190)])
+        layouts = _plan_text_layouts(
+            image,
+            [
+                TextReplacement(
+                    region=manual_region,
+                    translated_text="Factory Direct",
+                    force=True,
+                    erase_regions=source_regions,
+                )
+            ],
+        )
+
+        mask = _build_inpaint_mask(image, layouts)
+
+        self.assertEqual(mask[70, 220], 0)
+        self.assertEqual(mask[90, 100], 255)
+        self.assertEqual(mask[130, 100], 255)
 
     def test_lama_runtime_limit_falls_back_without_failing_render(self):
         old_max_pixels = settings.lama_max_pixels

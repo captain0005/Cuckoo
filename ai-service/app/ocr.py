@@ -65,9 +65,28 @@ class PaddleOcrImageRecognizer:
     def recognize(self, image_path: Path) -> list[TextRegion]:
         image = Image.open(image_path).convert("RGB")
         payloads = self._predict_payloads(image)
+        return self._regions_from_payloads(payloads, x_offset=0, y_offset=0)
+
+    def recognize_crops(self, image_path: Path, crop_boxes: list[tuple[int, int, int, int]]) -> list[TextRegion]:
+        image = Image.open(image_path).convert("RGB")
+        image_width, image_height = image.size
+        regions: list[TextRegion] = []
+        for x, y, width, height in crop_boxes:
+            x1 = max(0, min(image_width, x))
+            y1 = max(0, min(image_height, y))
+            x2 = max(x1, min(image_width, x + width))
+            y2 = max(y1, min(image_height, y + height))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            crop = image.crop((x1, y1, x2, y2))
+            payloads = self._predict_payloads(crop)
+            regions.extend(self._regions_from_payloads(payloads, x_offset=x1, y_offset=y1))
+        return regions
+
+    def _regions_from_payloads(self, payloads: list[dict[str, Any]], *, x_offset: int, y_offset: int) -> list[TextRegion]:
         regions: list[TextRegion] = []
         for payload in payloads:
-            regions.extend(self._regions_from_payload(payload))
+            regions.extend(self._regions_from_payload(payload, x_offset=x_offset, y_offset=y_offset))
         return [region for region in regions if region.confidence >= self.min_confidence]
 
     def _predict_payloads(self, image: Image.Image) -> list[dict[str, Any]]:
@@ -87,7 +106,7 @@ class PaddleOcrImageRecognizer:
                 payloads.append(payload)
         return payloads
 
-    def _regions_from_payload(self, payload: dict[str, Any]) -> list[TextRegion]:
+    def _regions_from_payload(self, payload: dict[str, Any], *, x_offset: int = 0, y_offset: int = 0) -> list[TextRegion]:
         texts = _first_present(payload, "rec_texts", "texts")
         scores = _first_present(payload, "rec_scores", "scores")
         raw_boxes = _first_present(payload, "rec_boxes", "dt_polys", "rec_polys")
@@ -105,15 +124,16 @@ class PaddleOcrImageRecognizer:
             y_values = [point[1] for point in polygon]
             x1, x2 = min(x_values), max(x_values)
             y1, y2 = min(y_values), max(y_values)
+            shifted_polygon = [(x + x_offset, y + y_offset) for x, y in polygon]
             regions.append(
                 TextRegion(
                     text=text,
                     confidence=confidence,
-                    x=max(0, int(round(x1))),
-                    y=max(0, int(round(y1))),
+                    x=max(0, int(round(x1)) + x_offset),
+                    y=max(0, int(round(y1)) + y_offset),
                     width=max(1, int(round(x2 - x1))),
                     height=max(1, int(round(y2 - y1))),
-                    polygon=polygon,
+                    polygon=shifted_polygon,
                 )
             )
         return regions

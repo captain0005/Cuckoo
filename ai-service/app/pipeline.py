@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from app.image_renderer import TextReplacement, render_replacements
-from app.ocr import OcrRecognizer, TextRegion, build_ocr_recognizer, release_ocr_resources
+from app.ocr import OcrRecognizer, TextRegion, build_ocr_recognizer
 from app.text_utils import is_translatable_ocr_text
 from app.translation import Translator, build_translator
 
@@ -92,9 +92,10 @@ class ImageTranslationPipeline:
         manual_regions: list[ManualRegion] | None = None,
         inpaint_engine: str | None = None,
     ) -> ImageTranslationResult:
-        regions = self.recognizer.recognize(input_path)
+        manual_regions = manual_regions or []
+        regions = self._recognize_regions(input_path, manual_regions)
         warnings: list[str] = []
-        replacements = self._build_replacements(input_path, regions, manual_regions or [])
+        replacements = self._build_replacements(input_path, regions, manual_regions)
 
         if not replacements:
             if manual_regions:
@@ -105,8 +106,6 @@ class ImageTranslationPipeline:
             output_path.write_bytes(input_path.read_bytes())
         else:
             candidate_count = len(replacements)
-            if _uses_lama_inpainting(inpaint_engine):
-                release_ocr_resources()
             replacements = render_replacements(
                 source_path=input_path,
                 output_path=output_path,
@@ -140,6 +139,19 @@ class ImageTranslationPipeline:
             entries=entries,
             warnings=warnings,
         )
+
+    def _recognize_regions(self, input_path: Path, manual_regions: list[ManualRegion]) -> list[TextRegion]:
+        if not manual_regions:
+            return self.recognizer.recognize(input_path)
+
+        recognize_crops = getattr(self.recognizer, "recognize_crops", None)
+        if not callable(recognize_crops):
+            return self.recognizer.recognize(input_path)
+
+        with Image.open(input_path) as image:
+            image_size = image.size
+        crop_boxes = [_expand_manual_ocr_box(region.to_pixel_box(image_size), image_size) for region in manual_regions]
+        return recognize_crops(input_path, crop_boxes)
 
     def _build_replacements(
         self,
@@ -218,7 +230,14 @@ class ImageTranslationPipeline:
                 height=height,
                 polygon=[(x, y), (x + width, y), (x + width, y + height), (x, y + height)],
             )
-            replacements.append(TextReplacement(region=combined_region, translated_text=translated_text, force=True))
+            replacements.append(
+                TextReplacement(
+                    region=combined_region,
+                    translated_text=translated_text,
+                    force=True,
+                    erase_regions=selected_regions,
+                )
+            )
 
         return replacements
 
@@ -241,6 +260,18 @@ def _translate_texts(translator: Translator, texts: list[str], source_language: 
 def _uses_lama_inpainting(inpaint_engine: str | None) -> bool:
     engine = (inpaint_engine or "lama").strip().lower()
     return engine in {"", "auto", "lama"}
+
+
+def _expand_manual_ocr_box(box: tuple[int, int, int, int], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
+    image_width, image_height = image_size
+    x, y, width, height = box
+    padding_x = max(4, int(width * 0.04))
+    padding_y = max(4, int(height * 0.05))
+    x1 = max(0, x - padding_x)
+    y1 = max(0, y - padding_y)
+    x2 = min(image_width, x + width + padding_x)
+    y2 = min(image_height, y + height + padding_y)
+    return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
 
 
 def _should_split_manual_group(regions: list[TextRegion], manual_box: tuple[int, int, int, int]) -> bool:
