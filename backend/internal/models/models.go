@@ -57,6 +57,7 @@ type JobItem struct {
 	OutputPath        string
 	OutputFilename    string
 	Status            string `gorm:"index"`
+	RecognitionMode   string
 	ManualRegionsJSON string `gorm:"type:text"`
 	ErrorMessage      string
 	StartedAt         *time.Time
@@ -176,16 +177,17 @@ type ManualRegion struct {
 }
 
 type JobItemResponse struct {
-	ID             uint           `json:"id"`
-	Index          int            `json:"index"`
-	SourceFilename string         `json:"source_filename"`
-	OutputFilename string         `json:"output_filename"`
-	FileURL        string         `json:"file_url"`
-	Status         string         `json:"status"`
-	ManualRegions  []ManualRegion `json:"manual_regions"`
-	Error          string         `json:"error"`
-	StartedAt      *time.Time     `json:"started_at"`
-	FinishedAt     *time.Time     `json:"finished_at"`
+	ID              uint           `json:"id"`
+	Index           int            `json:"index"`
+	SourceFilename  string         `json:"source_filename"`
+	OutputFilename  string         `json:"output_filename"`
+	FileURL         string         `json:"file_url"`
+	Status          string         `json:"status"`
+	RecognitionMode string         `json:"recognition_mode"`
+	ManualRegions   []ManualRegion `json:"manual_regions"`
+	Error           string         `json:"error"`
+	StartedAt       *time.Time     `json:"started_at"`
+	FinishedAt      *time.Time     `json:"finished_at"`
 }
 
 type JobResponse struct {
@@ -264,16 +266,17 @@ func (item JobItem) ToResponse(fileURL func(jobID, filename string) string) JobI
 		itemFileURL = fileURL(item.JobID, item.OutputFilename)
 	}
 	return JobItemResponse{
-		ID:             item.ID,
-		Index:          item.ItemIndex,
-		SourceFilename: item.SourceFilename,
-		OutputFilename: item.OutputFilename,
-		FileURL:        itemFileURL,
-		Status:         item.Status,
-		ManualRegions:  decodeManualRegions(item.ManualRegionsJSON),
-		Error:          item.ErrorMessage,
-		StartedAt:      item.StartedAt,
-		FinishedAt:     item.FinishedAt,
+		ID:              item.ID,
+		Index:           item.ItemIndex,
+		SourceFilename:  item.SourceFilename,
+		OutputFilename:  item.OutputFilename,
+		FileURL:         itemFileURL,
+		Status:          item.Status,
+		RecognitionMode: item.RecognitionMode,
+		ManualRegions:   decodeManualRegions(item.ManualRegionsJSON),
+		Error:           item.ErrorMessage,
+		StartedAt:       item.StartedAt,
+		FinishedAt:      item.FinishedAt,
 	}
 }
 

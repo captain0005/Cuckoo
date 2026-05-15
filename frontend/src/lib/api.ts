@@ -22,6 +22,7 @@ export type JobItem = {
   output_filename: string;
   file_url: string;
   status: "queued" | "processing" | "completed" | "failed" | "canceled" | string;
+  recognition_mode: "auto" | "manual" | string;
   manual_regions: ManualRegion[];
   error: string;
   started_at: string | null;
@@ -157,7 +158,13 @@ export async function createJob(
   files: File[],
   sourceLanguage: string,
   targetLanguage: string,
-  options: { token: string; manualRegions?: ManualRegion[][]; inpaintEngine?: string; recognitionMode?: "auto" | "manual" },
+  options: {
+    token: string;
+    manualRegions?: ManualRegion[][];
+    recognitionModes?: ("auto" | "manual")[];
+    inpaintEngine?: string;
+    recognitionMode?: "auto" | "manual" | "mixed";
+  },
 ) {
   const payload = new FormData();
   files.forEach((file) => payload.append("files", file));
@@ -165,6 +172,9 @@ export async function createJob(
   payload.append("target_language", targetLanguage);
   payload.append("inpaint_engine", options.inpaintEngine || "lama");
   payload.append("recognition_mode", options.recognitionMode || "auto");
+  if (options.recognitionModes?.length) {
+    payload.append("recognition_modes", JSON.stringify(options.recognitionModes));
+  }
   if (options.manualRegions?.some((regions) => regions.length > 0)) {
     payload.append("manual_regions", JSON.stringify(options.manualRegions));
   }

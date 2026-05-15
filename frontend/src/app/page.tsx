@@ -29,8 +29,10 @@ const STATUS_LABELS: Record<string, string> = {
 
 type QueueStatus = "completed" | "processing" | "queued" | "failed" | "canceled";
 type RecognitionMode = "auto" | "manual";
+type JobRecognitionMode = RecognitionMode | "mixed";
 type InpaintEngine = "lama" | "opencv";
 type RegionMap = Record<string, ManualRegion[]>;
+type FileModeMap = Record<string, RecognitionMode>;
 type DemoKind = "shield" | "welder" | "params" | "device" | "cable" | "box" | "manual" | "parts";
 type ResizeHandle = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
 
@@ -43,6 +45,8 @@ type QueueRow = {
   progress: number;
   demoKind?: DemoKind;
   file?: File;
+  recognitionMode?: RecognitionMode;
+  manualRegionCount?: number;
 };
 
 type CanvasAction =
@@ -51,7 +55,8 @@ type CanvasAction =
   | { type: "resize"; index: number; handle: ResizeHandle; start: { x: number; y: number }; original: ManualRegion };
 
 type TaskSnapshot = {
-  recognitionMode: RecognitionMode;
+  recognitionMode: JobRecognitionMode;
+  modesByKey: FileModeMap;
   sourceLanguage: string;
   targetLanguage: string;
   inpaintEngine: InpaintEngine;
@@ -80,7 +85,7 @@ export default function Home() {
   const [targetLanguage, setTargetLanguage] = useState("en");
   const [inpaintEngine, setInpaintEngine] = useState<InpaintEngine>("lama");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [recognitionMode, setRecognitionMode] = useState<RecognitionMode>("manual");
+  const [fileModes, setFileModes] = useState<FileModeMap>({});
   const [manualRegions, setManualRegions] = useState<RegionMap>({});
   const [redoRegions, setRedoRegions] = useState<RegionMap>({});
   const [activeTaskSnapshot, setActiveTaskSnapshot] = useState<TaskSnapshot | null>(null);
@@ -95,25 +100,33 @@ export default function Home() {
 
   const isAuthenticated = Boolean(userToken && currentUser);
   const totalSize = useMemo(() => files.reduce((sum, file) => sum + file.size, 0), [files]);
-  const queueRows = useMemo(() => (files.length ? buildQueueRows(files, job) : DEMO_QUEUE), [files, job]);
-  const selectedFile = useMemo(
-    () => files.find((file) => fileKey(file) === selectedRegionFileKey) || files[0] || null,
-    [files, selectedRegionFileKey],
-  );
-  const selectedKey = selectedFile ? fileKey(selectedFile) : "demo-params";
   const isTaskRunning =
     isSubmitting ||
     workflowState === "uploading" ||
     job?.status === "queued" ||
     job?.status === "processing";
-  const displayRecognitionMode = isTaskRunning && activeTaskSnapshot ? activeTaskSnapshot.recognitionMode : recognitionMode;
+  const displayFileModes = isTaskRunning && activeTaskSnapshot ? activeTaskSnapshot.modesByKey : fileModes;
   const displayRegionsByKey =
-    isTaskRunning && activeTaskSnapshot && activeTaskSnapshot.recognitionMode === "manual" ? activeTaskSnapshot.regionsByKey : manualRegions;
-  const activeRegions = selectedFile ? displayRegionsByKey[fileKey(selectedFile)] || [] : [];
+    isTaskRunning && activeTaskSnapshot ? activeTaskSnapshot.regionsByKey : manualRegions;
+  const queueRows = useMemo(
+    () => (files.length ? buildQueueRows(files, job, displayFileModes, displayRegionsByKey) : DEMO_QUEUE),
+    [files, job, displayFileModes, displayRegionsByKey],
+  );
+  const selectedFile = useMemo(
+    () => files.find((file) => fileKey(file) === selectedRegionFileKey) || files[0] || null,
+    [files, selectedRegionFileKey],
+  );
+  const selectedKey = selectedFile ? fileKey(selectedFile) : "demo-params";
+  const selectedRecognitionMode = selectedFile ? displayFileModes[fileKey(selectedFile)] || "auto" : "auto";
+  const activeRegions = selectedFile && selectedRecognitionMode === "manual" ? displayRegionsByKey[fileKey(selectedFile)] || [] : [];
   const resultCount = job?.results?.length ?? 0;
   const regionCount = useMemo(
-    () => files.reduce((sum, file) => sum + (displayRegionsByKey[fileKey(file)]?.length || 0), 0),
-    [files, displayRegionsByKey],
+    () =>
+      files.reduce((sum, file) => {
+        const key = fileKey(file);
+        return sum + ((displayFileModes[key] || "auto") === "manual" ? displayRegionsByKey[key]?.length || 0 : 0);
+      }, 0),
+    [files, displayFileModes, displayRegionsByKey],
   );
   const visibleProgress = files.length || job ? Math.max(0, Math.min(100, progress)) : 23;
   const visibleTotal = job?.total || (files.length ? files.length : 30);
@@ -186,6 +199,7 @@ export default function Home() {
   useEffect(() => {
     if (!files.length) {
       setSelectedRegionFileKey("");
+      setFileModes({});
       setManualRegions({});
       setRedoRegions({});
       setActiveTaskSnapshot(null);
@@ -194,6 +208,14 @@ export default function Home() {
 
     const keys = new Set(files.map(fileKey));
     setSelectedRegionFileKey((currentKey) => (currentKey && keys.has(currentKey) ? currentKey : fileKey(files[0])));
+    setFileModes((currentModes) => {
+      const nextModes: FileModeMap = {};
+      for (const file of files) {
+        const key = fileKey(file);
+        nextModes[key] = currentModes[key] || "auto";
+      }
+      return nextModes;
+    });
     setManualRegions((currentRegions) => {
       const nextRegions: RegionMap = {};
       for (const file of files) {
@@ -227,6 +249,7 @@ export default function Home() {
     clearUserSession();
     setJob(null);
     setFiles([]);
+    setFileModes({});
     setManualRegions({});
     setRedoRegions({});
     setActiveTaskSnapshot(null);
@@ -302,6 +325,47 @@ export default function Home() {
     }));
   }
 
+  function enterManualModeForSelectedFile() {
+    if (!selectedFile || isTaskRunning) {
+      return;
+    }
+    const key = fileKey(selectedFile);
+    setFileModes((currentModes) => ({
+      ...currentModes,
+      [key]: "manual",
+    }));
+    setStatusText(`${selectedFile.name} 已切换为手动框选，处理前可继续调整选区。`);
+  }
+
+  function cancelManualModeForSelectedFile() {
+    if (!selectedFile || isTaskRunning) {
+      return;
+    }
+    const key = fileKey(selectedFile);
+    const regions = manualRegions[key] || [];
+    if (regions.length) {
+      const shouldClear = window.confirm("取消后会清空当前图片的手动框选区域，并改为自动识别。确定取消手动框选吗？");
+      if (!shouldClear) {
+        return;
+      }
+    }
+    setFileModes((currentModes) => ({
+      ...currentModes,
+      [key]: "auto",
+    }));
+    setManualRegions((currentRegions) => {
+      const nextRegions = { ...currentRegions };
+      delete nextRegions[key];
+      return nextRegions;
+    });
+    setRedoRegions((currentRedoRegions) => {
+      const nextRedoRegions = { ...currentRedoRegions };
+      delete nextRedoRegions[key];
+      return nextRedoRegions;
+    });
+    setStatusText(`${selectedFile.name} 已取消手动框选，将使用自动识别。`);
+  }
+
   function copyActiveRegionsToAll() {
     if (!files.length || !selectedFile) {
       setStatusText("请先添加图片并选择需要复制的框选区域。");
@@ -319,6 +383,13 @@ export default function Home() {
       }
       return nextRegions;
     });
+    setFileModes(() => {
+      const nextModes: FileModeMap = {};
+      for (const file of files) {
+        nextModes[fileKey(file)] = "manual";
+      }
+      return nextModes;
+    });
     setRedoRegions({});
     setStatusText(`已将当前 ${activeRegions.length} 个框选区域复制到全部图片。`);
   }
@@ -326,6 +397,7 @@ export default function Home() {
   function clearQueue() {
     setFiles([]);
     setJob(null);
+    setFileModes({});
     setManualRegions({});
     setRedoRegions({});
     setActiveTaskSnapshot(null);
@@ -376,12 +448,16 @@ export default function Home() {
 
   function createTaskSnapshot(targetFiles: File[]): TaskSnapshot {
     const regionsByKey: RegionMap = {};
+    const modesByKey: FileModeMap = {};
     for (const file of targetFiles) {
       const key = fileKey(file);
-      regionsByKey[key] = (manualRegions[key] || []).map((region) => ({ ...region }));
+      const mode = fileModes[key] || "auto";
+      modesByKey[key] = mode;
+      regionsByKey[key] = mode === "manual" ? (manualRegions[key] || []).map((region) => ({ ...region })) : [];
     }
     return {
-      recognitionMode,
+      recognitionMode: summarizeFileModes(targetFiles, modesByKey),
+      modesByKey,
       sourceLanguage,
       targetLanguage,
       inpaintEngine,
@@ -421,6 +497,15 @@ export default function Home() {
       setProgress(0);
       return;
     }
+    const missingManualRegions = targetFiles.filter((file) => {
+      const key = fileKey(file);
+      return (fileModes[key] || "auto") === "manual" && !(manualRegions[key] || []).length;
+    });
+    if (missingManualRegions.length) {
+      setStatusText(`手动框选图片需要至少 1 个选区：${missingManualRegions.map((file) => file.name).join("、")}`);
+      setProgress(0);
+      return;
+    }
 
     const taskSnapshot = createTaskSnapshot(targetFiles);
     setActiveTaskSnapshot(taskSnapshot);
@@ -431,12 +516,17 @@ export default function Home() {
     setProgress(3);
 
     try {
-      const regionsByFile = recognitionMode === "manual" ? targetFiles.map((file) => manualRegions[fileKey(file)] || []) : [];
+      const modesByFile = targetFiles.map((file) => taskSnapshot.modesByKey[fileKey(file)] || "auto");
+      const regionsByFile = targetFiles.map((file) => {
+        const key = fileKey(file);
+        return taskSnapshot.modesByKey[key] === "manual" ? taskSnapshot.regionsByKey[key] || [] : [];
+      });
       const createdJob = await createJob(targetFiles, sourceLanguage, targetLanguage, {
         token: userToken,
         manualRegions: regionsByFile,
+        recognitionModes: modesByFile,
         inpaintEngine,
-        recognitionMode,
+        recognitionMode: taskSnapshot.recognitionMode,
       });
       renderJobState(createdJob, setWorkflowState, setStatusText, setProgress);
       setJob(createdJob);
@@ -565,11 +655,11 @@ export default function Home() {
               filesCount={files.length}
               statusText={statusText}
               workflowState={workflowState}
-              recognitionMode={displayRecognitionMode}
+              recognitionMode={selectedRecognitionMode}
               isLocked={isTaskRunning}
-              taskSnapshot={isTaskRunning ? activeTaskSnapshot : null}
               canRedo={selectedFile ? Boolean(redoRegions[fileKey(selectedFile)]?.length) : false}
-              onRecognitionModeChange={setRecognitionMode}
+              onEnterManualMode={enterManualModeForSelectedFile}
+              onCancelManualMode={cancelManualModeForSelectedFile}
               onAddRegion={(region) => {
                 if (selectedFile) {
                   updateRegionsForFile(selectedFile, (currentRegions) => [...currentRegions, region].slice(0, 20));
@@ -723,7 +813,7 @@ function QueuePanel({
                 <strong>{row.name}</strong>
                 <small>{row.sizeLabel}</small>
               </span>
-              <StatusBadge status={row.status} />
+              <StatusBadge status={row.status} recognitionMode={row.recognitionMode} manualRegionCount={row.manualRegionCount || 0} />
             </button>
           );
         })}
@@ -756,9 +846,9 @@ function ImageEditorPanel({
   workflowState,
   recognitionMode,
   isLocked,
-  taskSnapshot,
   canRedo,
-  onRecognitionModeChange,
+  onEnterManualMode,
+  onCancelManualMode,
   onAddRegion,
   onChangeRegion,
   onDeleteRegion,
@@ -772,9 +862,9 @@ function ImageEditorPanel({
   workflowState: string;
   recognitionMode: RecognitionMode;
   isLocked: boolean;
-  taskSnapshot: TaskSnapshot | null;
   canRedo: boolean;
-  onRecognitionModeChange: (mode: RecognitionMode) => void;
+  onEnterManualMode: () => void;
+  onCancelManualMode: () => void;
   onAddRegion: (region: ManualRegion) => void;
   onChangeRegion: (index: number, region: ManualRegion) => void;
   onDeleteRegion: (index: number) => void;
@@ -819,7 +909,7 @@ function ImageEditorPanel({
       ? "拖拽框选区域，调整大小和位置"
       : "自动识别会扫描整张图，无需框选区域";
   const taskBadge = isLocked
-    ? `当前任务：${(taskSnapshot?.recognitionMode || recognitionMode) === "manual" ? "手动框选" : "自动识别"}处理中`
+    ? `当前任务：${recognitionMode === "manual" ? "手动框选" : "自动识别"}处理中`
     : `${isManualMode ? "手动框选" : "自动识别"}编辑模式`;
 
   function changeZoom(delta: number) {
@@ -863,35 +953,42 @@ function ImageEditorPanel({
     <section className="canvas-panel">
       <div className="canvas-toolbar">
         <div className="canvas-mode-group">
-          <div className="segmented-control" aria-label="识别模式">
-            <button
-              className={recognitionMode === "auto" ? "active" : ""}
-              type="button"
-              aria-pressed={recognitionMode === "auto"}
-              disabled={isLocked}
-              onClick={() => onRecognitionModeChange("auto")}
-            >
-              自动识别
-            </button>
-            <button
-              className={recognitionMode === "manual" ? "active" : ""}
-              type="button"
-              aria-pressed={recognitionMode === "manual"}
-              disabled={isLocked}
-              onClick={() => onRecognitionModeChange("manual")}
-            >
-              手动框选
-            </button>
-          </div>
-          <div className={`task-mode-pill${isLocked ? " locked" : ""}`}>
-            <span>{taskBadge}</span>
-          </div>
           {isLocked ? (
-            <div className="task-lock-note" aria-label="选区已锁定，只读显示">
-              <LockIcon />
-              <span>选区已锁定，只读显示</span>
+            <>
+              <div className={`task-mode-pill locked`}>
+                <span>{taskBadge}</span>
+              </div>
+              <div className="task-lock-note" aria-label="选区已锁定，只读显示">
+                <LockIcon />
+                <span>选区已锁定，只读显示</span>
+              </div>
+            </>
+          ) : isManualMode ? (
+            <div className="manual-mode-toolbar" aria-label="当前图片手动框选设置">
+              <span className="manual-mode-notice">
+                <InfoIcon />
+                此图片将按手动框选处理
+              </span>
+              <button className="manual-cancel-button" type="button" onClick={onCancelManualMode}>
+                取消手动框选
+              </button>
+              <span className="manual-mode-help">取消后可重新使用自动识别</span>
             </div>
-          ) : null}
+          ) : (
+            <>
+              <div className="segmented-control" aria-label="当前图片识别方式">
+                <button className="active" type="button" aria-pressed="true">
+                  自动识别
+                </button>
+                <button type="button" aria-pressed="false" onClick={onEnterManualMode}>
+                  手动框选
+                </button>
+              </div>
+              <div className="task-mode-pill">
+                <span>{taskBadge}</span>
+              </div>
+            </>
+          )}
         </div>
         <div className="canvas-tools" aria-label="画布工具">
           <button type="button" onClick={onUndoRegion} disabled={isLocked || !hasRegions || !isManualMode} title="撤销上一个框选">
@@ -1381,7 +1478,8 @@ function TaskPanel({
           <div className="task-list-row" key={`task-${row.id}`}>
             <span className="queue-index small">{row.index}</span>
             <span className="task-file-name">{row.name}</span>
-            <span className={`task-state ${row.status}`}>{taskStateText(row)}</span>
+            <TaskModeBadge row={row} />
+            {row.status !== "queued" ? <span className={`task-state ${row.status}`}>{taskStateText(row)}</span> : null}
             {row.status === "processing" || row.status === "queued" ? (
               <div className="mini-progress">
                 <span style={{ width: `${row.progress}%` }} />
@@ -1445,13 +1543,43 @@ function DemoPreviewCard({ kind, label }: { kind: string; label: string }) {
   );
 }
 
-function StatusBadge({ status }: { status: QueueStatus }) {
+function StatusBadge({
+  status,
+  recognitionMode,
+  manualRegionCount,
+}: {
+  status: QueueStatus;
+  recognitionMode?: RecognitionMode;
+  manualRegionCount: number;
+}) {
+  if (status === "queued" && recognitionMode) {
+    return <span className={`mode-badge ${recognitionMode}`}>{queueModeBadgeText(recognitionMode, manualRegionCount)}</span>;
+  }
   return (
     <span className={`status-badge ${status}`}>
       {STATUS_LABELS[status]}
       <span aria-hidden="true">{status === "completed" ? "✓" : status === "failed" ? "!" : status === "canceled" ? "−" : status === "processing" ? "◌" : "○"}</span>
     </span>
   );
+}
+
+function TaskModeBadge({ row }: { row: QueueRow }) {
+  const mode = row.recognitionMode || "auto";
+  return <span className={`task-mode-badge ${mode}`}>{modeBadgeText(mode, row.manualRegionCount || 0)}</span>;
+}
+
+function modeBadgeText(mode: RecognitionMode, manualRegionCount: number) {
+  if (mode === "manual") {
+    return `手动框选 ${manualRegionCount} 区域`;
+  }
+  return "自动识别";
+}
+
+function queueModeBadgeText(mode: RecognitionMode, manualRegionCount: number) {
+  if (mode === "manual") {
+    return `手动 ${manualRegionCount}`;
+  }
+  return "自动识别";
 }
 
 function taskStateText(row: QueueRow) {
@@ -1467,11 +1595,14 @@ function taskStateText(row: QueueRow) {
   return STATUS_LABELS[row.status];
 }
 
-function buildQueueRows(files: File[], job: TranslationJob | null): QueueRow[] {
+function buildQueueRows(files: File[], job: TranslationJob | null, modesByKey: FileModeMap = {}, regionsByKey: RegionMap = {}): QueueRow[] {
   if (job?.items?.length) {
     return files.map((file, index) => {
       const item = job.items[index];
       const itemStatus = normalizeQueueStatus(item?.status || "queued");
+      const key = fileKey(file);
+      const recognitionMode = normalizeRecognitionModeValue(item?.recognition_mode || modesByKey[key] || "auto");
+      const manualRegionCount = recognitionMode === "manual" ? item?.manual_regions?.length || regionsByKey[key]?.length || 0 : 0;
       const itemProgress =
         itemStatus === "completed"
           ? 100
@@ -1486,6 +1617,8 @@ function buildQueueRows(files: File[], job: TranslationJob | null): QueueRow[] {
         status: itemStatus,
         progress: itemProgress,
         file,
+        recognitionMode,
+        manualRegionCount,
       };
     });
   }
@@ -1517,6 +1650,8 @@ function buildQueueRows(files: File[], job: TranslationJob | null): QueueRow[] {
       status,
       progress: itemProgress,
       file,
+      recognitionMode: normalizeRecognitionModeValue(modesByKey[fileKey(file)] || "auto"),
+      manualRegionCount: (modesByKey[fileKey(file)] || "auto") === "manual" ? regionsByKey[fileKey(file)]?.length || 0 : 0,
     };
   });
 }
@@ -1526,6 +1661,18 @@ function normalizeQueueStatus(status: string): QueueStatus {
     return status;
   }
   return "queued";
+}
+
+function normalizeRecognitionModeValue(value: string): RecognitionMode {
+  return value === "manual" ? "manual" : "auto";
+}
+
+function summarizeFileModes(files: File[], modesByKey: FileModeMap): JobRecognitionMode {
+  if (!files.length) {
+    return "auto";
+  }
+  const firstMode = modesByKey[fileKey(files[0])] || "auto";
+  return files.some((file) => (modesByKey[fileKey(file)] || "auto") !== firstMode) ? "mixed" : firstMode;
 }
 
 function renderJobState(
@@ -1691,6 +1838,16 @@ function RefreshIcon() {
     <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none">
       <path d="M20 12a8 8 0 0 1-13.66 5.66M4 12A8 8 0 0 1 17.66 6.34" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       <path d="M7 18H4v3M17 6h3V3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 11v5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M12 8h.01" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
     </svg>
   );
 }

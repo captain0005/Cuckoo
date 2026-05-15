@@ -1607,6 +1607,33 @@ select {
   color: #64748b;
 }
 
+.mode-badge,
+.task-mode-badge {
+  min-width: 76px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  padding: 8px 9px;
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.mode-badge.auto,
+.task-mode-badge.auto {
+  border: 1px solid #d8e8ff;
+  background: #f1f7ff;
+  color: #168df2;
+}
+
+.mode-badge.manual,
+.task-mode-badge.manual {
+  border: 1px solid rgba(7, 146, 139, 0.26);
+  background: #ecfbf8;
+  color: #078f8a;
+}
+
 .queue-summary {
   display: flex;
   justify-content: space-between;
@@ -1745,6 +1772,61 @@ select {
 .task-lock-note svg {
   flex: 0 0 auto;
   color: #6e7f93;
+}
+
+.manual-mode-toolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.manual-mode-notice {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #ffc46d;
+  border-radius: 8px;
+  background: #fff8ed;
+  padding: 0 14px;
+  color: #9b5b08;
+  font-size: 14px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.manual-mode-notice svg {
+  flex: 0 0 auto;
+  color: #f59e0b;
+}
+
+.manual-cancel-button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ff7f8c;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 0 20px;
+  color: #ef4444;
+  font-size: 14px;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.manual-cancel-button:hover {
+  background: #fff5f5;
+}
+
+.manual-mode-help {
+  color: #8390a3;
+  font-size: 13px;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .task-mode-pill small {
@@ -2420,10 +2502,15 @@ select {
 .task-list-row {
   min-height: 48px;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
   align-items: center;
   column-gap: 12px;
   border-bottom: 1px solid #e8edf4;
+}
+
+.task-mode-badge {
+  min-width: 88px;
+  padding-inline: 10px;
 }
 
 .task-state {

@@ -32,12 +32,13 @@ type Handler struct {
 }
 
 type uploadedImage struct {
-	ItemID         uint
-	SourceFilename string
-	InputPath      string
-	OutputPath     string
-	OutputFilename string
-	ManualRegions  []services.ManualRegion
+	ItemID          uint
+	SourceFilename  string
+	InputPath       string
+	OutputPath      string
+	OutputFilename  string
+	RecognitionMode string
+	ManualRegions   []services.ManualRegion
 }
 
 type activeJobControl struct {
@@ -182,15 +183,29 @@ func (h *Handler) CreateJob(c *gin.Context) {
 	sourceLanguage := firstFormValue(form.Value, "source_language", "zh")
 	targetLanguage := firstFormValue(form.Value, "target_language", "en")
 	inpaintEngine := firstFormValue(form.Value, "inpaint_engine", "lama")
-	recognitionMode := normalizeRecognitionMode(firstFormValue(form.Value, "recognition_mode", "auto"))
+	defaultRecognitionMode := normalizeRecognitionMode(firstFormValue(form.Value, "recognition_mode", "auto"))
+	recognitionModes, err := parseRecognitionModesPayload(firstFormValue(form.Value, "recognition_modes", ""), len(files), defaultRecognitionMode)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
 	manualRegions, err := parseManualRegionsPayload(firstFormValue(form.Value, "manual_regions", ""))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
 	}
+	for index, mode := range recognitionModes {
+		if mode != "manual" {
+			continue
+		}
+		if index >= len(manualRegions) || len(manualRegions[index]) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"detail": "手动框选图片至少需要一个选区"})
+			return
+		}
+	}
 	jobID := uuid.NewString()
 
-	uploads, err := h.saveUploads(c, jobID, files, manualRegions)
+	uploads, err := h.saveUploads(c, jobID, files, recognitionModes, manualRegions)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
@@ -200,7 +215,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 		ID:              jobID,
 		UserID:          user.ID,
 		Status:          models.StatusQueued,
-		RecognitionMode: recognitionMode,
+		RecognitionMode: summarizeRecognitionModes(recognitionModes),
 		SourceLanguage:  sourceLanguage,
 		TargetLanguage:  targetLanguage,
 		InpaintEngine:   inpaintEngine,
@@ -211,7 +226,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 	items := make([]models.JobItem, 0, len(uploads))
 	for index, upload := range uploads {
 		regionsJSON := "[]"
-		if recognitionMode == "manual" {
+		if upload.RecognitionMode == "manual" {
 			regionsJSON = models.EncodeJSON(upload.ManualRegions)
 		}
 		items = append(items, models.JobItem{
@@ -222,6 +237,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 			OutputPath:        upload.OutputPath,
 			OutputFilename:    upload.OutputFilename,
 			Status:            models.StatusQueued,
+			RecognitionMode:   upload.RecognitionMode,
 			ManualRegionsJSON: regionsJSON,
 		})
 	}
@@ -231,7 +247,7 @@ func (h *Handler) CreateJob(c *gin.Context) {
 	}
 	for index := range uploads {
 		uploads[index].ItemID = items[index].ID
-		if recognitionMode != "manual" {
+		if uploads[index].RecognitionMode != "manual" {
 			uploads[index].ManualRegions = nil
 		}
 	}
@@ -405,7 +421,13 @@ func (h *Handler) ExportJobToFolder(c *gin.Context) {
 	})
 }
 
-func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.FileHeader, manualRegions [][]services.ManualRegion) ([]uploadedImage, error) {
+func (h *Handler) saveUploads(
+	c *gin.Context,
+	jobID string,
+	files []*multipart.FileHeader,
+	recognitionModes []string,
+	manualRegions [][]services.ManualRegion,
+) ([]uploadedImage, error) {
 	uploadDir := h.cfg.UploadDir(jobID)
 	outputDir := h.cfg.OutputDir(jobID)
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
@@ -437,12 +459,17 @@ func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.F
 		if index < len(manualRegions) {
 			regions = manualRegions[index]
 		}
+		recognitionMode := "auto"
+		if index < len(recognitionModes) {
+			recognitionMode = recognitionModes[index]
+		}
 		uploads = append(uploads, uploadedImage{
-			SourceFilename: filename,
-			InputPath:      inputPath,
-			OutputPath:     filepath.Join(outputDir, outputFilename),
-			OutputFilename: outputFilename,
-			ManualRegions:  regions,
+			SourceFilename:  filename,
+			InputPath:       inputPath,
+			OutputPath:      filepath.Join(outputDir, outputFilename),
+			OutputFilename:  outputFilename,
+			RecognitionMode: recognitionMode,
+			ManualRegions:   regions,
 		})
 	}
 	return uploads, nil
@@ -614,6 +641,44 @@ func normalizeRecognitionMode(value string) string {
 		return "manual"
 	}
 	return "auto"
+}
+
+func parseRecognitionModesPayload(raw string, fileCount int, fallback string) ([]string, error) {
+	if fileCount <= 0 {
+		return nil, nil
+	}
+	defaultMode := normalizeRecognitionMode(fallback)
+	modes := make([]string, fileCount)
+	for index := range modes {
+		modes[index] = defaultMode
+	}
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return modes, nil
+	}
+	var payload []string
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return nil, errors.New("invalid recognition_modes payload")
+	}
+	for index := range modes {
+		if index < len(payload) {
+			modes[index] = normalizeRecognitionMode(payload[index])
+		}
+	}
+	return modes, nil
+}
+
+func summarizeRecognitionModes(modes []string) string {
+	if len(modes) == 0 {
+		return "auto"
+	}
+	first := normalizeRecognitionMode(modes[0])
+	for _, mode := range modes[1:] {
+		if normalizeRecognitionMode(mode) != first {
+			return "mixed"
+		}
+	}
+	return first
 }
 
 func parseManualRegionsPayload(raw string) ([][]services.ManualRegion, error) {
