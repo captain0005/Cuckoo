@@ -5,7 +5,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from app.image_renderer import TextReplacement, render_replacements
+from app.copywriting import LayoutTranslationRequest, translate_for_layout
+from app.image_renderer import TextReplacement, classify_region_role, render_replacements
 from app.ocr import OcrRecognizer, TextRegion, build_ocr_recognizer
 from app.text_utils import is_translatable_ocr_text
 from app.translation import Translator, build_translator
@@ -160,21 +161,40 @@ class ImageTranslationPipeline:
         manual_regions: list[ManualRegion],
     ) -> list[TextReplacement]:
         translatable = [region for region in regions if is_translatable_ocr_text(region.text)]
+        with Image.open(input_path) as image:
+            image_size = image.size
+            role_by_region_id = {
+                id(region): classify_region_role(region, image_size, image=image)
+                for region in translatable
+            }
         if manual_regions:
-            with Image.open(input_path) as image:
-                image_size = image.size
-            return self._build_manual_replacements(translatable, manual_regions, image_size)
+            return self._build_manual_replacements(translatable, manual_regions, image_size, role_by_region_id)
 
         replacements: list[TextReplacement] = []
-        translated_texts = _translate_texts(
+        requests = [
+            LayoutTranslationRequest(
+                source_text=region.text,
+                role=role_by_region_id.get(id(region), "body"),
+                region_box=region.box,
+                image_size=image_size,
+            )
+            for region in translatable
+        ]
+        translated_texts = translate_for_layout(
             self.translator,
-            [region.text for region in translatable],
+            requests,
             self.source_language,
             self.target_language,
         )
         for region, translated_text in zip(translatable, translated_texts):
             if translated_text.strip():
-                replacements.append(TextReplacement(region=region, translated_text=translated_text))
+                replacements.append(
+                    TextReplacement(
+                        region=region,
+                        translated_text=translated_text,
+                        role_hint=role_by_region_id.get(id(region)),
+                    )
+                )
         return replacements
 
     def _build_manual_replacements(
@@ -182,6 +202,7 @@ class ImageTranslationPipeline:
         regions: list[TextRegion],
         manual_regions: list[ManualRegion],
         image_size: tuple[int, int],
+        role_by_region_id: dict[int, str],
     ) -> list[TextReplacement]:
         replacements: list[TextReplacement] = []
         consumed: set[int] = set()
@@ -201,23 +222,35 @@ class ImageTranslationPipeline:
             selected_regions = [region for _, region in grouped]
             if _should_split_manual_group(selected_regions, manual_box):
                 ordered_regions = _reading_order(selected_regions)
-                translated_texts = _translate_texts(
+                requests = [
+                    LayoutTranslationRequest(
+                        source_text=region.text,
+                        role=role_by_region_id.get(id(region), "manual"),
+                        region_box=region.box,
+                        image_size=image_size,
+                    )
+                    for region in ordered_regions
+                ]
+                translated_texts = translate_for_layout(
                     self.translator,
-                    [region.text for region in ordered_regions],
+                    requests,
                     self.source_language,
                     self.target_language,
                 )
                 for region, translated_text in zip(ordered_regions, translated_texts):
                     if translated_text.strip():
-                        replacements.append(TextReplacement(region=region, translated_text=translated_text, force=True))
+                        replacements.append(
+                            TextReplacement(
+                                region=region,
+                                translated_text=translated_text,
+                                force=True,
+                                role_hint=role_by_region_id.get(id(region)),
+                            )
+                        )
                 continue
 
             source_text = " ".join(region.text.strip() for region in _reading_order(selected_regions) if region.text.strip())
             if not source_text:
-                continue
-
-            translated_text = self.translator.translate(source_text, self.source_language, self.target_language)
-            if not translated_text.strip():
                 continue
 
             x, y, width, height = manual_box
@@ -230,31 +263,35 @@ class ImageTranslationPipeline:
                 height=height,
                 polygon=[(x, y), (x + width, y), (x + width, y + height), (x, y + height)],
             )
+            role = classify_region_role(combined_region, image_size)
+            translated_texts = translate_for_layout(
+                self.translator,
+                [
+                    LayoutTranslationRequest(
+                        source_text=source_text,
+                        role=role,
+                        region_box=combined_region.box,
+                        image_size=image_size,
+                    )
+                ],
+                self.source_language,
+                self.target_language,
+            )
+            translated_text = translated_texts[0] if translated_texts else ""
+            if not translated_text.strip():
+                continue
+
             replacements.append(
                 TextReplacement(
                     region=combined_region,
                     translated_text=translated_text,
                     force=True,
                     erase_regions=selected_regions,
+                    role_hint=role,
                 )
             )
 
         return replacements
-
-
-def _translate_texts(translator: Translator, texts: list[str], source_language: str, target_language: str) -> list[str]:
-    if not texts:
-        return []
-    if len(texts) == 1:
-        return [translator.translate(texts[0], source_language, target_language)]
-
-    joined_text = "\n".join(texts)
-    translated = translator.translate(joined_text, source_language, target_language)
-    translated_lines = [line.strip() for line in translated.splitlines() if line.strip()]
-    if len(translated_lines) == len(texts):
-        return translated_lines
-
-    return [translator.translate(text, source_language, target_language) for text in texts]
 
 
 def _uses_lama_inpainting(inpaint_engine: str | None) -> bool:

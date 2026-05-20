@@ -303,6 +303,27 @@ class ImageRendererTest(unittest.TestCase):
         self.assertEqual(layouts[0].align, "center")
         self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 34)
 
+    def test_long_top_description_is_subtitle_not_center_title(self):
+        image = Image.new("RGB", (790, 1340), "white")
+        region = TextRegion(
+            text="\u5185\u7f6e\u9ad8\u8fbe1000\u6beb\u5b89\u9ad8\u6027\u80fd\u9502\u7535\u6c60,12\u5c0f\u65f6\u8d85\u957f\u7eed\u822a",
+            confidence=0.99,
+            x=48,
+            y=202,
+            width=691,
+            height=28,
+            polygon=[(48, 202), (739, 202), (739, 230), (48, 230)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="1000mAh Battery, Up to 12h")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(layouts[0].role, "subtitle")
+        self.assertLessEqual(getattr(layouts[0].font, "size", 0), 22)
+
     def test_blue_feature_bar_keeps_icon_area_and_uses_white_text(self):
         image = Image.new("RGB", (800, 800), "white")
         ImageDraw.Draw(image).polygon([(25, 528), (270, 528), (260, 575), (15, 575)], fill=(0, 66, 245))
@@ -462,6 +483,29 @@ class ImageRendererTest(unittest.TestCase):
         self.assertEqual(len(layouts), 1)
         self.assertEqual(layouts[0].lines, ["Light alarm"])
         self.assertGreaterEqual(getattr(layouts[0].font, "size", 0), 20)
+        self.assertEqual(layouts[0].color, (255, 255, 255))
+
+    def test_label_layout_uses_colored_banner_bounds_when_available(self):
+        image = Image.new("RGB", (790, 1340), "white")
+        ImageDraw.Draw(image).rectangle((42, 1210, 270, 1284), fill=(0, 83, 245))
+        region = TextRegion(
+            text="\u706f\u5149\u62a5\u8b66",
+            confidence=0.99,
+            x=90,
+            y=1238,
+            width=120,
+            height=32,
+            polygon=[(90, 1238), (210, 1238), (210, 1270), (90, 1270)],
+        )
+
+        layouts = _plan_text_layouts(
+            image,
+            [TextReplacement(region=region, translated_text="Light Alarm")],
+        )
+
+        self.assertEqual(len(layouts), 1)
+        self.assertLessEqual(layouts[0].box[0], 60)
+        self.assertGreaterEqual(layouts[0].box[2], 190)
         self.assertEqual(layouts[0].color, (255, 255, 255))
 
     def test_bottom_item_captions_stay_in_columns(self):

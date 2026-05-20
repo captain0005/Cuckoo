@@ -18,6 +18,9 @@ class TextUtilsTest(unittest.TestCase):
         self.assertTrue(is_translatable_ocr_text("\u4e09\u5408\u4e00 2026"))
         self.assertFalse(is_translatable_ocr_text("2026 EMF"))
 
+    def test_translatable_text_rejects_single_cjk_technical_marker(self):
+        self.assertFalse(is_translatable_ocr_text("MF:0.1-1999mG\u62160.01-99.99\u03bcT"))
+
 
 if __name__ == "__main__":
     unittest.main()

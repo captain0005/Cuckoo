@@ -193,7 +193,10 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(result.regions_detected, 4)
             self.assertEqual(result.regions_replaced, 4)
             self.assertEqual([entry.source_text for entry in result.entries], [region.text for region in regions])
-            self.assertEqual([entry.translated_text for entry in result.entries], [f"EN:{region.text}" for region in regions])
+            self.assertEqual(
+                [entry.translated_text for entry in result.entries],
+                ["Product Model", "Screen Material", "Power Supply", "Battery"],
+            )
             self.assertEqual(len(translator.calls), 1)
             self.assertTrue(output_path.exists())
 

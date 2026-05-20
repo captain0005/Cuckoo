@@ -51,4 +51,7 @@ def is_translatable_ocr_text(value: str) -> bool:
     compact = re.sub(r"\s+", "", text)
     if re.fullmatch(r"[\W_]+", compact, flags=re.UNICODE):
         return False
+    cjk_count = len(_CJK_RE.findall(compact))
+    if cjk_count <= 1 and re.search(r"[A-Za-z0-9]", compact):
+        return False
     return True

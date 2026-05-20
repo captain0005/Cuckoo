@@ -17,6 +17,7 @@ class TextReplacement:
     translated_text: str
     force: bool = False
     erase_regions: list[TextRegion] | None = None
+    role_hint: str | None = None
 
 
 @dataclass(slots=True)
@@ -75,12 +76,12 @@ def render_replacements(
 def _plan_text_layouts(image: Image.Image, replacements: list[TextReplacement]) -> list[TextLayout]:
     layouts: list[TextLayout] = []
     for item in replacements:
-        role = _region_role(item.region, image.size, image=image)
+        role = item.role_hint or _region_role(item.region, image.size, image=image)
         if item.force and role in SKIP_ROLES:
             role = "manual"
         if not _should_render_replacement(item, image.size, role):
             continue
-        box = _layout_box(item.region, image.size, role)
+        box = _layout_box(item.region, image.size, role, image=image)
         color = _estimate_text_color(image, item.region, role)
         font, lines = _fit_text(item.translated_text, box[2], box[3], role=role)
         layouts.append(
@@ -97,6 +98,15 @@ def _plan_text_layouts(image: Image.Image, replacements: list[TextReplacement]) 
         )
     layouts = _stabilize_bottom_label_columns(layouts, image.size)
     return _resolve_text_collisions(layouts, image.size)
+
+
+def classify_region_role(
+    region: TextRegion,
+    image_size: tuple[int, int],
+    *,
+    image: Image.Image | None = None,
+) -> str:
+    return _region_role(region, image_size, image=image)
 
 
 def _stabilize_bottom_label_columns(layouts: list[TextLayout], image_size: tuple[int, int]) -> list[TextLayout]:
@@ -632,7 +642,13 @@ def _erase_box(region: TextRegion, image_size: tuple[int, int], role: str) -> tu
     return x1, y1, max(1, x2 - x1), max(1, y2 - y1)
 
 
-def _layout_box(region: TextRegion, image_size: tuple[int, int], role: str) -> tuple[int, int, int, int]:
+def _layout_box(
+    region: TextRegion,
+    image_size: tuple[int, int],
+    role: str,
+    *,
+    image: Image.Image | None = None,
+) -> tuple[int, int, int, int]:
     image_width, image_height = image_size
     x, y, width, height = _expanded_box(region, image_size)
     page_margin = max(18, int(image_width * 0.035))
@@ -679,6 +695,15 @@ def _layout_box(region: TextRegion, image_size: tuple[int, int], role: str) -> t
         return left, top, max(1, right - left), cell_height
 
     if role == "feature_bar":
+        background_box = _colored_background_bounds(image, region, image_size, prefer_blue=True) if image is not None else None
+        if background_box is not None:
+            bg_x, bg_y, bg_width, bg_height = background_box
+            inset_x = max(4, int(bg_width * 0.06))
+            inset_y = max(2, int(bg_height * 0.10))
+            left = max(region.x, bg_x + inset_x)
+            right = min(image_width - page_margin, bg_x + bg_width - inset_x)
+            top = max(0, min(image_height - max(1, bg_height - inset_y * 2), bg_y + inset_y))
+            return left, top, max(1, right - left), max(1, bg_height - inset_y * 2)
         left = max(page_margin, region.x)
         right = min(image_width - page_margin, region.x + region.width)
         feature_height = max(region.height, int(region.height * 1.35), int(image_height * 0.042))
@@ -686,6 +711,17 @@ def _layout_box(region: TextRegion, image_size: tuple[int, int], role: str) -> t
         return left, top, max(1, right - left), feature_height
 
     if role == "tag":
+        background_box = _colored_background_bounds(image, region, image_size, prefer_blue=False) if image is not None else None
+        if background_box is not None:
+            bg_x, bg_y, bg_width, bg_height = background_box
+            inset_x = max(3, int(bg_width * 0.04))
+            inset_y = max(1, int(bg_height * 0.08))
+            return (
+                bg_x + inset_x,
+                bg_y + inset_y,
+                max(1, bg_width - inset_x * 2),
+                max(1, bg_height - inset_y * 2),
+            )
         tag_width = min(
             image_width - page_margin * 2,
             max(width, int(region.width * 1.12)),
@@ -697,6 +733,17 @@ def _layout_box(region: TextRegion, image_size: tuple[int, int], role: str) -> t
         return left, top, tag_width, tag_height
 
     if role == "label":
+        background_box = _colored_background_bounds(image, region, image_size, prefer_blue=True) if image is not None else None
+        if background_box is not None and background_box[2] <= image_width * 0.45:
+            bg_x, bg_y, bg_width, bg_height = background_box
+            inset_x = max(4, int(bg_width * 0.06))
+            inset_y = max(1, int(bg_height * 0.08))
+            return (
+                bg_x + inset_x,
+                bg_y + inset_y,
+                max(1, bg_width - inset_x * 2),
+                max(1, bg_height - inset_y * 2),
+            )
         label_width = min(
             image_width - page_margin * 2,
             max(width, int(region.width * 2.4), int(image_width * 0.25)),
@@ -735,7 +782,7 @@ def _region_role(region: TextRegion, image_size: tuple[int, int], image: Image.I
     if (
         y_ratio < 0.22
         and 0.40 <= center_x_ratio <= 0.60
-        and (height_ratio >= 0.035 or width_ratio >= 0.30)
+        and height_ratio >= 0.035
     ):
         return "center_title"
     if y_ratio < 0.22 and (height_ratio >= 0.035 or (y_ratio < 0.10 and width_ratio >= 0.36)):
@@ -876,6 +923,76 @@ def _saturated_background_ratio(image: Image.Image, region: TextRegion, image_si
     return float(np.mean(saturated))
 
 
+def _colored_background_bounds(
+    image: Image.Image,
+    region: TextRegion,
+    image_size: tuple[int, int],
+    *,
+    prefer_blue: bool,
+) -> tuple[int, int, int, int] | None:
+    crop_box = _region_crop_box(image_size, region, margin_x=2.3, margin_y=1.3)
+    if crop_box is None:
+        return None
+
+    x1, y1, x2, y2 = crop_box
+    crop = image.crop(crop_box).convert("RGB")
+    arr = np.array(crop, dtype=np.uint8)
+    if arr.size == 0:
+        return None
+
+    red = arr[:, :, 0].astype(np.int16)
+    green = arr[:, :, 1].astype(np.int16)
+    blue = arr[:, :, 2].astype(np.int16)
+    max_channel = np.maximum(np.maximum(red, green), blue)
+    min_channel = np.minimum(np.minimum(red, green), blue)
+    if prefer_blue:
+        mask = (blue > 130) & (blue > red * 1.18) & (blue >= green * 0.92)
+    else:
+        mask = (max_channel - min_channel > 55) & (max_channel > 120)
+
+    if float(np.mean(mask)) < 0.035:
+        return None
+
+    ys, xs = np.where(mask)
+    if xs.size == 0 or ys.size == 0:
+        return None
+
+    left = int(xs.min()) + x1
+    top = int(ys.min()) + y1
+    right = int(xs.max()) + x1 + 1
+    bottom = int(ys.max()) + y1 + 1
+    width = right - left
+    height = bottom - top
+    if width < max(region.width, 12) or height < max(region.height * 0.8, 8):
+        return None
+
+    image_width, image_height = image_size
+    width = min(width, int(image_width * 0.72))
+    left = max(0, min(image_width - width, left))
+    top = max(0, top)
+    bottom = min(image_height, bottom)
+    return left, top, max(1, width), max(1, bottom - top)
+
+
+def _region_crop_box(
+    image_size: tuple[int, int],
+    region: TextRegion,
+    *,
+    margin_x: float,
+    margin_y: float,
+) -> tuple[int, int, int, int] | None:
+    image_width, image_height = image_size
+    pad_x = max(2, int(region.width * margin_x))
+    pad_y = max(2, int(region.height * margin_y))
+    x1 = max(0, region.x - pad_x)
+    y1 = max(0, region.y - pad_y)
+    x2 = min(image_width, region.x + region.width + pad_x)
+    y2 = min(image_height, region.y + region.height + pad_y)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
 
 
 def _dominant_blue_ratio(image: Image.Image, region: TextRegion, image_size: tuple[int, int]) -> float:
@@ -901,16 +1018,10 @@ def _region_crop(
     margin_x: float,
     margin_y: float,
 ) -> Image.Image | None:
-    image_width, image_height = image_size
-    pad_x = max(2, int(region.width * margin_x))
-    pad_y = max(2, int(region.height * margin_y))
-    x1 = max(0, region.x - pad_x)
-    y1 = max(0, region.y - pad_y)
-    x2 = min(image_width, region.x + region.width + pad_x)
-    y2 = min(image_height, region.y + region.height + pad_y)
-    if x2 <= x1 or y2 <= y1:
+    crop_box = _region_crop_box(image_size, region, margin_x=margin_x, margin_y=margin_y)
+    if crop_box is None:
         return None
-    return image.crop((x1, y1, x2, y2))
+    return image.crop(crop_box)
 
 
 def _is_micro_or_embedded_text(region: TextRegion, image_size: tuple[int, int]) -> bool:
@@ -956,6 +1067,8 @@ def _should_render_replacement(item: TextReplacement, image_size: tuple[int, int
 def _estimate_text_color(image: Image.Image, region: TextRegion, role: str = "body") -> tuple[int, int, int]:
     if role == "feature_bar":
         return (255, 255, 255)
+    if role in {"title", "center_title", "section_title"} and _dominant_blue_ratio(image, region, image.size) >= 0.08:
+        return _dominant_foreground_color(image, region, prefer="blue") or (0, 83, 245)
     x, y, width, height = _expanded_box(region, image.size)
     crop = image.crop((x, y, x + width, y + height)).convert("RGB")
     arr = np.array(crop, dtype=np.uint8)
@@ -975,6 +1088,32 @@ def _estimate_text_color(image: Image.Image, region: TextRegion, role: str = "bo
     selected_luminance = float(0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2])
     if median >= 128 and selected_luminance > min(185, median - 10):
         return (24, 24, 24)
+    return tuple(int(max(0, min(255, value))) for value in color)
+
+
+def _dominant_foreground_color(
+    image: Image.Image,
+    region: TextRegion,
+    *,
+    prefer: str,
+) -> tuple[int, int, int] | None:
+    crop = _region_crop(image, region, image.size, margin_x=0.08, margin_y=0.12)
+    if crop is None:
+        return None
+    arr = np.array(crop.convert("RGB"), dtype=np.uint8)
+    if arr.size == 0:
+        return None
+    red = arr[:, :, 0].astype(np.int16)
+    green = arr[:, :, 1].astype(np.int16)
+    blue = arr[:, :, 2].astype(np.int16)
+    if prefer == "blue":
+        mask = (blue > 120) & (blue > red * 1.18) & (blue >= green * 0.92)
+    else:
+        luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        mask = luminance < 140
+    if not np.any(mask):
+        return None
+    color = np.median(arr[mask], axis=0)
     return tuple(int(max(0, min(255, value))) for value in color)
 
 
