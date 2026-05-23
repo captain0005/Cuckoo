@@ -19,8 +19,6 @@ RUN apt-get update \
       libsm6 \
       libxext6 \
       libxrender1 \
-      fontconfig \
-      fonts-dejavu-core \
       tzdata \
     && rm -rf /var/lib/apt/lists/*
 
