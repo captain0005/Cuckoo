@@ -197,7 +197,7 @@ class PipelineTest(unittest.TestCase):
                 [entry.translated_text for entry in result.entries],
                 ["Product Model", "Screen Material", "Power Supply", "Battery"],
             )
-            self.assertEqual(len(translator.calls), 1)
+            self.assertEqual(len(translator.calls), 0)
             self.assertTrue(output_path.exists())
 
 

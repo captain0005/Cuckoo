@@ -86,17 +86,34 @@ def translate_for_layout(
     if not requests:
         return []
 
-    source_texts = [request.source_text for request in requests]
-    translated_texts = _translate_texts(translator, source_texts, source_language, target_language)
-    return [
-        adapt_translation_for_layout(
-            source_text=request.source_text,
-            translated_text=translated_text,
-            role=request.role,
-            target_language=target_language,
-        )
-        for request, translated_text in zip(requests, translated_texts)
-    ]
+    results = [""] * len(requests)
+    pending_indexes: list[int] = []
+    pending_texts: list[str] = []
+
+    if _is_english_target(target_language):
+        for index, request in enumerate(requests):
+            dictionary_match = _lookup_short_copy(request.source_text)
+            if dictionary_match:
+                results[index] = dictionary_match
+                continue
+            pending_indexes.append(index)
+            pending_texts.append(request.source_text)
+    else:
+        pending_indexes = list(range(len(requests)))
+        pending_texts = [request.source_text for request in requests]
+
+    if pending_texts:
+        translated_texts = _translate_texts(translator, pending_texts, source_language, target_language)
+        for index, translated_text in zip(pending_indexes, translated_texts):
+            request = requests[index]
+            results[index] = adapt_translation_for_layout(
+                source_text=request.source_text,
+                translated_text=translated_text,
+                role=request.role,
+                target_language=target_language,
+            )
+
+    return results
 
 
 def adapt_translation_for_layout(

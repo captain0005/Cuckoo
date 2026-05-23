@@ -67,7 +67,20 @@ class CopywritingTest(unittest.TestCase):
         result = translate_for_layout(translator, requests, "zh", "en")
 
         self.assertEqual(result, ["Product Parameters", "Screen Material"])
+        self.assertEqual(len(translator.calls), 0)
+
+    def test_batch_translation_only_calls_model_for_unknown_copy(self):
+        translator = RecordingTranslator()
+        requests = [
+            LayoutTranslationRequest("\u4ea7\u54c1\u53c2\u6570", "title", (0, 0, 100, 40), (790, 1393)),
+            LayoutTranslationRequest("\u672a\u77e5\u6807\u9898", "title", (0, 48, 100, 40), (790, 1393)),
+        ]
+
+        result = translate_for_layout(translator, requests, "zh", "en")
+
+        self.assertEqual(result, ["Product Parameters", "Literal \u672a\u77e5\u6807\u9898 Translated With Extra Words"])
         self.assertEqual(len(translator.calls), 1)
+        self.assertEqual(translator.calls[0], "\u672a\u77e5\u6807\u9898")
 
 
 if __name__ == "__main__":
