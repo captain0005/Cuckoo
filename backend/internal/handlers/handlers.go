@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"mime/multipart"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/6602966029/cuckoo/backend/internal/config"
@@ -22,31 +24,26 @@ import (
 )
 
 type Handler struct {
-	cfg      config.Config
-	repo     *repository.Repository
-	aiClient *services.AIClient
+	cfg        config.Config
+	repo       *repository.Repository
+	aiClient   *services.AIClient
+	activeJobs map[string]*activeJobControl
+	activeMu   sync.Mutex
 }
 
 type uploadedImage struct {
-	SourceFilename string
-	InputPath      string
-	OutputPath     string
-	OutputFilename string
+	ItemID          uint
+	SourceFilename  string
+	InputPath       string
+	OutputPath      string
+	OutputFilename  string
+	RecognitionMode string
+	ManualRegions   []services.ManualRegion
 }
 
-type jobResponse struct {
-	JobID          string                     `json:"job_id"`
-	Status         string                     `json:"status"`
-	Progress       float64                    `json:"progress"`
-	Completed      int                        `json:"completed"`
-	Total          int                        `json:"total"`
-	SourceLanguage string                     `json:"source_language"`
-	TargetLanguage string                     `json:"target_language"`
-	Error          string                     `json:"error"`
-	CreatedAt      time.Time                  `json:"created_at"`
-	UpdatedAt      time.Time                  `json:"updated_at"`
-	DownloadURL    *string                    `json:"download_url"`
-	Results        []models.JobResultResponse `json:"results"`
+type activeJobControl struct {
+	cancelAll     context.CancelFunc
+	cancelCurrent context.CancelFunc
 }
 
 type exportFolderRequest struct {
@@ -62,21 +59,112 @@ type exportFolderResponse struct {
 
 func New(cfg config.Config, repo *repository.Repository) *Handler {
 	return &Handler{
-		cfg:      cfg,
-		repo:     repo,
-		aiClient: services.NewAIClient(cfg.AIServiceURL),
+		cfg:        cfg,
+		repo:       repo,
+		aiClient:   services.NewAIClient(cfg.AIServiceURL),
+		activeJobs: make(map[string]*activeJobControl),
 	}
 }
 
+func (h *Handler) registerActiveJob(jobID string, cancelAll context.CancelFunc) {
+	h.activeMu.Lock()
+	defer h.activeMu.Unlock()
+	h.activeJobs[jobID] = &activeJobControl{cancelAll: cancelAll}
+}
+
+func (h *Handler) setActiveCurrentCancel(jobID string, cancelCurrent context.CancelFunc) {
+	h.activeMu.Lock()
+	defer h.activeMu.Unlock()
+	if control, ok := h.activeJobs[jobID]; ok {
+		control.cancelCurrent = cancelCurrent
+	}
+}
+
+func (h *Handler) clearActiveCurrentCancel(jobID string) {
+	h.activeMu.Lock()
+	defer h.activeMu.Unlock()
+	if control, ok := h.activeJobs[jobID]; ok {
+		control.cancelCurrent = nil
+	}
+}
+
+func (h *Handler) cancelActiveCurrent(jobID string) {
+	var cancel context.CancelFunc
+	h.activeMu.Lock()
+	if control, ok := h.activeJobs[jobID]; ok {
+		cancel = control.cancelCurrent
+	}
+	h.activeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (h *Handler) cancelActiveJob(jobID string) {
+	var cancel context.CancelFunc
+	h.activeMu.Lock()
+	if control, ok := h.activeJobs[jobID]; ok {
+		cancel = control.cancelAll
+	}
+	h.activeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (h *Handler) unregisterActiveJob(jobID string) {
+	h.activeMu.Lock()
+	defer h.activeMu.Unlock()
+	delete(h.activeJobs, jobID)
+}
+
 func (h *Handler) Health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+	aiStatus, aiDetail, aiPayload := h.aiHealth()
+	payload := gin.H{
 		"status":     "ok",
 		"service":    "backend",
 		"ai_service": h.cfg.AIServiceURL,
-	})
+		"ai_status":  aiStatus,
+	}
+	if len(aiPayload) > 0 {
+		payload["ai"] = aiPayload
+	}
+	if aiDetail != "" {
+		payload["ai_error"] = aiDetail
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func (h *Handler) aiHealth() (string, string, map[string]any) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.cfg.AIServiceURL+"/health", nil)
+	if err != nil {
+		return "invalid", err.Error(), nil
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		return "unreachable", err.Error(), nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "unhealthy", resp.Status, nil
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "ok", "ai health payload was not valid JSON", nil
+	}
+	return "ok", "", payload
 }
 
 func (h *Handler) CreateJob(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+		return
+	}
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "multipart form is required"})
@@ -94,29 +182,100 @@ func (h *Handler) CreateJob(c *gin.Context) {
 
 	sourceLanguage := firstFormValue(form.Value, "source_language", "zh")
 	targetLanguage := firstFormValue(form.Value, "target_language", "en")
+	inpaintEngine := firstFormValue(form.Value, "inpaint_engine", "lama")
+	defaultRecognitionMode := normalizeRecognitionMode(firstFormValue(form.Value, "recognition_mode", "auto"))
+	recognitionModes, err := parseRecognitionModesPayload(firstFormValue(form.Value, "recognition_modes", ""), len(files), defaultRecognitionMode)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+	manualRegions, err := parseManualRegionsPayload(firstFormValue(form.Value, "manual_regions", ""))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+	for index, mode := range recognitionModes {
+		if mode != "manual" {
+			continue
+		}
+		if index >= len(manualRegions) || len(manualRegions[index]) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"detail": "手动框选图片至少需要一个选区"})
+			return
+		}
+	}
 	jobID := uuid.NewString()
 
-	uploads, err := h.saveUploads(c, jobID, files)
+	uploads, err := h.saveUploads(c, jobID, files, recognitionModes, manualRegions)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
 	}
 
 	job := &models.Job{
-		ID:             jobID,
-		Status:         models.StatusQueued,
-		SourceLanguage: sourceLanguage,
-		TargetLanguage: targetLanguage,
-		Total:          len(uploads),
-		Completed:      0,
+		ID:              jobID,
+		UserID:          user.ID,
+		Status:          models.StatusQueued,
+		RecognitionMode: summarizeRecognitionModes(recognitionModes),
+		SourceLanguage:  sourceLanguage,
+		TargetLanguage:  targetLanguage,
+		InpaintEngine:   inpaintEngine,
+		Total:           len(uploads),
+		Processed:       0,
+		Completed:       0,
 	}
-	if err := h.repo.CreateJob(job); err != nil {
+	items := make([]models.JobItem, 0, len(uploads))
+	for index, upload := range uploads {
+		regionsJSON := "[]"
+		if upload.RecognitionMode == "manual" {
+			regionsJSON = models.EncodeJSON(upload.ManualRegions)
+		}
+		items = append(items, models.JobItem{
+			JobID:             jobID,
+			ItemIndex:         index + 1,
+			SourceFilename:    upload.SourceFilename,
+			InputPath:         upload.InputPath,
+			OutputPath:        upload.OutputPath,
+			OutputFilename:    upload.OutputFilename,
+			Status:            models.StatusQueued,
+			RecognitionMode:   upload.RecognitionMode,
+			ManualRegionsJSON: regionsJSON,
+		})
+	}
+	if err := h.repo.CreateJobWithItems(job, &items); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
+	for index := range uploads {
+		uploads[index].ItemID = items[index].ID
+		if uploads[index].RecognitionMode != "manual" {
+			uploads[index].ManualRegions = nil
+		}
+	}
 
-	go h.processJob(context.Background(), jobID, sourceLanguage, targetLanguage, uploads)
+	job.Items = items
+	jobCtx, cancelJob := context.WithCancel(context.Background())
+	h.registerActiveJob(jobID, cancelJob)
+	go h.processJob(jobCtx, jobID, sourceLanguage, targetLanguage, inpaintEngine, uploads)
+	job.User = *user
 	c.JSON(http.StatusAccepted, h.toJobResponse(job))
+}
+
+func (h *Handler) ListJobs(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "login required"})
+		return
+	}
+	jobs, err := h.repo.ListJobs(user.ID, queryInt(c, "limit", 50))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	items := make([]models.JobResponse, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, h.toJobResponse(&job))
+	}
+	c.JSON(http.StatusOK, gin.H{"jobs": items})
 }
 
 func (h *Handler) GetJob(c *gin.Context) {
@@ -129,6 +288,10 @@ func (h *Handler) GetJob(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
+		return
+	}
 	c.JSON(http.StatusOK, h.toJobResponse(job))
 }
 
@@ -139,7 +302,11 @@ func (h *Handler) DownloadJob(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
 		return
 	}
-	if job.Status != models.StatusCompleted {
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
+		return
+	}
+	if job.Status != models.StatusCompleted && job.Status != models.StatusPartial {
 		c.JSON(http.StatusConflict, gin.H{"detail": "job is not completed yet"})
 		return
 	}
@@ -152,6 +319,64 @@ func (h *Handler) DownloadJob(c *gin.Context) {
 	c.FileAttachment(zipPath, "cuckoo-"+jobID+".zip")
 }
 
+func (h *Handler) CancelCurrentJobItem(c *gin.Context) {
+	jobID := c.Param("jobID")
+	job, err := h.repo.GetJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
+		return
+	}
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
+		return
+	}
+	if job.Status != models.StatusQueued && job.Status != models.StatusProcessing {
+		c.JSON(http.StatusConflict, gin.H{"detail": "job is not processing"})
+		return
+	}
+
+	if _, err := h.repo.CancelCurrentItem(jobID); err != nil && !errors.Is(err, repository.ErrNoCancelableItem) {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	h.cancelActiveCurrent(jobID)
+	nextJob, err := h.repo.GetJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, h.toJobResponse(nextJob))
+}
+
+func (h *Handler) CancelJob(c *gin.Context) {
+	jobID := c.Param("jobID")
+	job, err := h.repo.GetJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
+		return
+	}
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
+		return
+	}
+	if job.Status != models.StatusQueued && job.Status != models.StatusProcessing {
+		c.JSON(http.StatusConflict, gin.H{"detail": "job is not processing"})
+		return
+	}
+
+	if err := h.repo.CancelJob(jobID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	h.cancelActiveJob(jobID)
+	nextJob, err := h.repo.GetJob(jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, h.toJobResponse(nextJob))
+}
+
 func (h *Handler) ExportJobToFolder(c *gin.Context) {
 	jobID := c.Param("jobID")
 	job, err := h.repo.GetJob(jobID)
@@ -159,7 +384,11 @@ func (h *Handler) ExportJobToFolder(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "job not found"})
 		return
 	}
-	if job.Status != models.StatusCompleted {
+	if !h.canAccessJob(c, job) {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "job access denied"})
+		return
+	}
+	if job.Status != models.StatusCompleted && job.Status != models.StatusPartial {
 		c.JSON(http.StatusConflict, gin.H{"detail": "job is not completed yet"})
 		return
 	}
@@ -192,7 +421,13 @@ func (h *Handler) ExportJobToFolder(c *gin.Context) {
 	})
 }
 
-func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.FileHeader) ([]uploadedImage, error) {
+func (h *Handler) saveUploads(
+	c *gin.Context,
+	jobID string,
+	files []*multipart.FileHeader,
+	recognitionModes []string,
+	manualRegions [][]services.ManualRegion,
+) ([]uploadedImage, error) {
 	uploadDir := h.cfg.UploadDir(jobID)
 	outputDir := h.cfg.OutputDir(jobID)
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
@@ -220,36 +455,85 @@ func (h *Handler) saveUploads(c *gin.Context, jobID string, files []*multipart.F
 			return nil, err
 		}
 		outputFilename := outputName(filename)
+		var regions []services.ManualRegion
+		if index < len(manualRegions) {
+			regions = manualRegions[index]
+		}
+		recognitionMode := "auto"
+		if index < len(recognitionModes) {
+			recognitionMode = recognitionModes[index]
+		}
 		uploads = append(uploads, uploadedImage{
-			SourceFilename: filename,
-			InputPath:      inputPath,
-			OutputPath:     filepath.Join(outputDir, outputFilename),
-			OutputFilename: outputFilename,
+			SourceFilename:  filename,
+			InputPath:       inputPath,
+			OutputPath:      filepath.Join(outputDir, outputFilename),
+			OutputFilename:  outputFilename,
+			RecognitionMode: recognitionMode,
+			ManualRegions:   regions,
 		})
 	}
 	return uploads, nil
 }
 
-func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetLanguage string, uploads []uploadedImage) {
+func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetLanguage, inpaintEngine string, uploads []uploadedImage) {
+	defer h.unregisterActiveJob(jobID)
 	if err := h.repo.SetJobStatus(jobID, models.StatusProcessing, ""); err != nil {
 		return
 	}
 
 	for _, upload := range uploads {
-		result, err := h.aiClient.TranslateImage(ctx, upload.InputPath, sourceLanguage, targetLanguage)
+		if ctx.Err() != nil {
+			return
+		}
+		if status, err := h.repo.JobStatus(jobID); err == nil && status == models.StatusCanceled {
+			return
+		}
+		started, err := h.repo.SetItemProcessing(upload.ItemID)
 		if err != nil {
 			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
 			return
+		}
+		if !started {
+			continue
+		}
+
+		itemCtx, cancelItem := context.WithCancel(ctx)
+		h.setActiveCurrentCancel(jobID, cancelItem)
+		result, err := h.translateImageWithInpaintFallback(
+			itemCtx,
+			upload.InputPath,
+			sourceLanguage,
+			targetLanguage,
+			inpaintEngine,
+			upload.ManualRegions,
+		)
+		h.clearActiveCurrentCancel(jobID)
+		cancelItem()
+		if err != nil {
+			item, itemErr := h.repo.GetJobItem(upload.ItemID)
+			if itemErr == nil && item.Status == models.StatusCanceled {
+				continue
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			_ = h.repo.MarkItemFailed(jobID, upload.ItemID, err.Error())
+			continue
+		}
+
+		item, err := h.repo.GetJobItem(upload.ItemID)
+		if err == nil && item.Status == models.StatusCanceled {
+			continue
 		}
 
 		rawImage, err := base64.StdEncoding.DecodeString(result.OutputImageBase64)
 		if err != nil {
-			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
-			return
+			_ = h.repo.MarkItemFailed(jobID, upload.ItemID, err.Error())
+			continue
 		}
 		if err := os.WriteFile(upload.OutputPath, rawImage, 0o644); err != nil {
-			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
-			return
+			_ = h.repo.MarkItemFailed(jobID, upload.ItemID, err.Error())
+			continue
 		}
 
 		entries := make([]models.TranslationEntry, 0, len(result.Entries))
@@ -270,44 +554,78 @@ func (h *Handler) processJob(ctx context.Context, jobID, sourceLanguage, targetL
 			EntriesJSON:     models.EncodeJSON(entries),
 			WarningsJSON:    models.EncodeJSON(result.Warnings),
 		}
-		if err := h.repo.AddResult(jobID, dbResult); err != nil {
+		sourceCharacters, translatedCharacters := countEntryCharacters(entries)
+		if err := h.repo.AddResult(jobID, upload.ItemID, dbResult, sourceCharacters, translatedCharacters); err != nil {
+			if errors.Is(err, repository.ErrItemNotProcessable) {
+				continue
+			}
 			_ = h.repo.SetJobStatus(jobID, models.StatusFailed, err.Error())
 			return
 		}
 	}
-	_ = h.repo.CompleteJob(jobID)
+	if status, err := h.repo.JobStatus(jobID); err == nil && status == models.StatusCanceled {
+		return
+	}
+	_ = h.repo.FinalizeJobFromItems(jobID)
 }
 
-func (h *Handler) toJobResponse(job *models.Job) jobResponse {
-	progress := 0.0
-	if job.Total > 0 {
-		progress = float64(job.Completed) / float64(job.Total) * 100
-	}
-	var downloadURL *string
-	if job.Status == models.StatusCompleted {
-		value := "/api/jobs/" + job.ID + "/download"
-		downloadURL = &value
-	}
-
-	results := make([]models.JobResultResponse, 0, len(job.Results))
-	for _, result := range job.Results {
-		results = append(results, result.ToResponse(h.cfg.PublicFileURL(job.ID, result.OutputFilename)))
+func (h *Handler) translateImageWithInpaintFallback(
+	ctx context.Context,
+	imagePath string,
+	sourceLanguage string,
+	targetLanguage string,
+	inpaintEngine string,
+	manualRegions []services.ManualRegion,
+) (*services.AITranslationResponse, error) {
+	result, err := h.aiClient.TranslateImage(ctx, imagePath, sourceLanguage, targetLanguage, inpaintEngine, manualRegions)
+	if err == nil || !shouldFallbackToOpenCV(inpaintEngine, err) {
+		return result, err
 	}
 
-	return jobResponse{
-		JobID:          job.ID,
-		Status:         job.Status,
-		Progress:       progress,
-		Completed:      job.Completed,
-		Total:          job.Total,
-		SourceLanguage: job.SourceLanguage,
-		TargetLanguage: job.TargetLanguage,
-		Error:          job.ErrorMessage,
-		CreatedAt:      job.CreatedAt,
-		UpdatedAt:      job.UpdatedAt,
-		DownloadURL:    downloadURL,
-		Results:        results,
+	fallbackResult, fallbackErr := h.aiClient.TranslateImage(ctx, imagePath, sourceLanguage, targetLanguage, "opencv", manualRegions)
+	if fallbackErr != nil {
+		return nil, errors.Join(err, fallbackErr)
 	}
+	fallbackResult.Warnings = append(
+		[]string{"高清 LAMA 擦除连接中断，已自动切换快速 OpenCV 擦除。"},
+		fallbackResult.Warnings...,
+	)
+	return fallbackResult, nil
+}
+
+func shouldFallbackToOpenCV(inpaintEngine string, err error) bool {
+	engine := strings.ToLower(strings.TrimSpace(inpaintEngine))
+	if engine != "" && engine != "auto" && engine != "lama" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "eof") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "server closed idle connection") ||
+		strings.Contains(message, "broken pipe")
+}
+
+func (h *Handler) toJobResponse(job *models.Job) models.JobResponse {
+	return job.ToResponse(h.cfg.PublicFileURL)
+}
+
+func (h *Handler) canAccessJob(c *gin.Context, job *models.Job) bool {
+	user, ok := currentUser(c)
+	if !ok {
+		return false
+	}
+	return job.UserID == user.ID || isAdminRole(user.Role)
+}
+
+func countEntryCharacters(entries []models.TranslationEntry) (int, int) {
+	source := 0
+	translated := 0
+	for _, entry := range entries {
+		source += len([]rune(entry.SourceText))
+		translated += len([]rune(entry.TranslatedText))
+	}
+	return source, translated
 }
 
 func firstFormValue(values map[string][]string, key, fallback string) string {
@@ -316,6 +634,97 @@ func firstFormValue(values map[string][]string, key, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(items[0])
+}
+
+func normalizeRecognitionMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "manual") {
+		return "manual"
+	}
+	return "auto"
+}
+
+func parseRecognitionModesPayload(raw string, fileCount int, fallback string) ([]string, error) {
+	if fileCount <= 0 {
+		return nil, nil
+	}
+	defaultMode := normalizeRecognitionMode(fallback)
+	modes := make([]string, fileCount)
+	for index := range modes {
+		modes[index] = defaultMode
+	}
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return modes, nil
+	}
+	var payload []string
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return nil, errors.New("invalid recognition_modes payload")
+	}
+	for index := range modes {
+		if index < len(payload) {
+			modes[index] = normalizeRecognitionMode(payload[index])
+		}
+	}
+	return modes, nil
+}
+
+func summarizeRecognitionModes(modes []string) string {
+	if len(modes) == 0 {
+		return "auto"
+	}
+	first := normalizeRecognitionMode(modes[0])
+	for _, mode := range modes[1:] {
+		if normalizeRecognitionMode(mode) != first {
+			return "mixed"
+		}
+	}
+	return first
+}
+
+func parseManualRegionsPayload(raw string) ([][]services.ManualRegion, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	var payload [][]services.ManualRegion
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return nil, errors.New("invalid manual_regions payload")
+	}
+	for fileIndex := range payload {
+		regions := payload[fileIndex]
+		cleaned := regions[:0]
+		for _, region := range regions {
+			if region.Width <= 0 || region.Height <= 0 {
+				continue
+			}
+			region.X = clamp01(region.X)
+			region.Y = clamp01(region.Y)
+			region.Width = clamp01(region.Width)
+			region.Height = clamp01(region.Height)
+			if region.X+region.Width > 1 {
+				region.Width = 1 - region.X
+			}
+			if region.Y+region.Height > 1 {
+				region.Height = 1 - region.Y
+			}
+			if region.Width <= 0 || region.Height <= 0 {
+				continue
+			}
+			cleaned = append(cleaned, region)
+		}
+		payload[fileIndex] = cleaned
+	}
+	return payload, nil
+}
+
+func clamp01(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)

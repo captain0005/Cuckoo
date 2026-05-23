@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/6602966029/cuckoo/backend/internal/config"
@@ -17,10 +18,18 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	h := handlers.New(cfg, repo)
 	r.GET("/", h.Health)
 	r.GET("/health", h.Health)
-	r.POST("/api/jobs", h.CreateJob)
-	r.GET("/api/jobs/:jobID", h.GetJob)
-	r.GET("/api/jobs/:jobID/download", h.DownloadJob)
-	r.POST("/api/jobs/:jobID/export-folder", h.ExportJobToFolder)
+
+	r.POST("/api/auth/login", h.UserLogin)
+	auth := r.Group("/api")
+	auth.Use(h.RequireUser())
+	auth.GET("/me", h.CurrentUser)
+	auth.GET("/jobs", h.ListJobs)
+	auth.POST("/jobs", h.CreateJob)
+	auth.GET("/jobs/:jobID", h.GetJob)
+	auth.POST("/jobs/:jobID/cancel-current", h.CancelCurrentJobItem)
+	auth.POST("/jobs/:jobID/cancel", h.CancelJob)
+	auth.GET("/jobs/:jobID/download", h.DownloadJob)
+	auth.POST("/jobs/:jobID/export-folder", h.ExportJobToFolder)
 
 	r.POST("/api/admin/login", h.AdminLogin)
 	admin := r.Group("/api/admin")
@@ -30,6 +39,8 @@ func New(cfg config.Config, repo *repository.Repository) *gin.Engine {
 	admin.PUT("/users/:userID", h.UpdateAdminUser)
 	admin.DELETE("/users/:userID", h.DeleteAdminUser)
 	admin.GET("/api-keys", h.ListAdminAPIKeys)
+	admin.GET("/usage", h.ListAdminUsage)
+	admin.GET("/jobs", h.ListAdminJobs)
 
 	r.Static("/files", cfg.DataDir+"/outputs")
 	return r
@@ -82,6 +93,12 @@ func appendUniqueOrigin(origins []string, origin string) []string {
 }
 
 func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) string {
+	if isCuckooVercelOrigin(requestOrigin) {
+		return requestOrigin
+	}
+	if isLocalDevOrigin(requestOrigin) {
+		return requestOrigin
+	}
 	for _, allowedOrigin := range allowedOrigins {
 		if allowedOrigin == "*" {
 			return "*"
@@ -94,4 +111,35 @@ func allowedOriginForRequest(requestOrigin string, allowedOrigins []string) stri
 		return allowedOrigins[0]
 	}
 	return ""
+}
+
+func isCuckooVercelOrigin(requestOrigin string) bool {
+	if strings.TrimSpace(requestOrigin) == "" {
+		return false
+	}
+	parsed, err := url.Parse(requestOrigin)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "cuckoo-black.vercel.app" ||
+		(strings.HasPrefix(host, "cuckoo-") && strings.HasSuffix(host, ".vercel.app"))
+}
+
+func isLocalDevOrigin(requestOrigin string) bool {
+	if strings.TrimSpace(requestOrigin) == "" {
+		return false
+	}
+	parsed, err := url.Parse(requestOrigin)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }

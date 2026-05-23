@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -17,6 +19,9 @@ type AIClient struct {
 	BaseURL    string
 	HTTPClient *http.Client
 }
+
+const aiTranslateMaxAttempts = 3
+const defaultAIClientTimeout = 15 * time.Minute
 
 type AITranslationResponse struct {
 	SourceFilename    string             `json:"source_filename"`
@@ -36,16 +41,23 @@ type TranslationEntry struct {
 	Box            map[string]int `json:"box"`
 }
 
+type ManualRegion struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
 func NewAIClient(baseURL string) *AIClient {
 	return &AIClient{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: aiClientTimeout(),
 		},
 	}
 }
 
-func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage, targetLanguage string) (*AITranslationResponse, error) {
+func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage, targetLanguage, inpaintEngine string, manualRegions []ManualRegion) (*AITranslationResponse, error) {
 	file, err := os.Open(imagePath)
 	if err != nil {
 		return nil, err
@@ -63,15 +75,48 @@ func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage
 	}
 	_ = writer.WriteField("source_language", sourceLanguage)
 	_ = writer.WriteField("target_language", targetLanguage)
+	if strings.TrimSpace(inpaintEngine) != "" {
+		_ = writer.WriteField("inpaint_engine", inpaintEngine)
+	}
+	if len(manualRegions) > 0 {
+		rawRegions, err := json.Marshal(manualRegions)
+		if err != nil {
+			return nil, err
+		}
+		_ = writer.WriteField("manual_regions", string(rawRegions))
+	}
 	if err := writer.Close(); err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/translate-image", &body)
+	contentType := writer.FormDataContentType()
+	bodyBytes := append([]byte(nil), body.Bytes()...)
+
+	var lastErr error
+	for attempt := 1; attempt <= aiTranslateMaxAttempts; attempt++ {
+		payload, err := c.postTranslateImage(ctx, bodyBytes, contentType)
+		if err == nil {
+			return payload, nil
+		}
+		lastErr = err
+		if attempt >= aiTranslateMaxAttempts || !isRetryableAIError(err) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt) * 2 * time.Second):
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *AIClient) postTranslateImage(ctx context.Context, bodyBytes []byte, contentType string) (*AITranslationResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/translate-image", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -95,4 +140,32 @@ func (c *AIClient) TranslateImage(ctx context.Context, imagePath, sourceLanguage
 		return nil, fmt.Errorf("ai-service did not return output_image_base64")
 	}
 	return &payload, nil
+}
+
+func isRetryableAIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "context canceled") || strings.Contains(message, "deadline exceeded") {
+		return false
+	}
+	return strings.Contains(message, "eof") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "server closed idle connection") ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "use of closed network connection")
+}
+
+func aiClientTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("AI_CLIENT_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return defaultAIClientTimeout
+	}
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil || seconds <= 0 {
+		return defaultAIClientTimeout
+	}
+	return time.Duration(seconds * float64(time.Second))
 }

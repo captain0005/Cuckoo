@@ -25,7 +25,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend-builder /out/server /app/server
 COPY ai-service/requirements.txt /tmp/ai-requirements.txt
-RUN pip install --no-cache-dir -r /tmp/ai-requirements.txt
+COPY ai-service/requirements-lama.txt /tmp/ai-requirements-lama.txt
+RUN pip install --no-cache-dir -r /tmp/ai-requirements.txt -r /tmp/ai-requirements-lama.txt
 COPY ai-service /app/ai-service
 COPY scripts/start-railway.sh /app/start-railway.sh
 
@@ -33,6 +34,7 @@ ENV GIN_MODE=release
 ENV DATA_DIR=/app/data
 ENV BACKEND_PORT=8080
 ENV SERVER_ADDR=0.0.0.0:8080
+ENV DATABASE_FALLBACK_SQLITE=true
 ENV AI_SERVICE_URL=http://127.0.0.1:9000
 ENV PYTHONPATH=/app/ai-service
 ENV TRANSLATOR_PROVIDER=openai

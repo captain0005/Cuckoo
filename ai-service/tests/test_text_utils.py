@@ -7,6 +7,9 @@ class TextUtilsTest(unittest.TestCase):
     def test_normalize_removes_spaces_between_cjk(self):
         self.assertEqual(normalize_ocr_text("\u4e09 \u5408 \u4e00"), "\u4e09\u5408\u4e00")
 
+    def test_normalize_repairs_common_product_ocr_confusions(self):
+        self.assertEqual(normalize_ocr_text("\u4ea7\u54c1\u53c1\u6570"), "\u4ea7\u54c1\u53c2\u6570")
+
     def test_contains_cjk(self):
         self.assertTrue(contains_cjk("\u7535\u78c1\u8f90\u5c04"))
         self.assertFalse(contains_cjk("EMF Detector"))
@@ -14,6 +17,9 @@ class TextUtilsTest(unittest.TestCase):
     def test_translatable_text_requires_cjk(self):
         self.assertTrue(is_translatable_ocr_text("\u4e09\u5408\u4e00 2026"))
         self.assertFalse(is_translatable_ocr_text("2026 EMF"))
+
+    def test_translatable_text_rejects_single_cjk_technical_marker(self):
+        self.assertFalse(is_translatable_ocr_text("MF:0.1-1999mG\u62160.01-99.99\u03bcT"))
 
 
 if __name__ == "__main__":

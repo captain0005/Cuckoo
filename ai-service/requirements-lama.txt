@@ -1,0 +1,3 @@
+# Optional high-quality inpainting engine.
+# Install alongside requirements.txt when INPAINT_ENGINE=lama.
+torch>=2.2
