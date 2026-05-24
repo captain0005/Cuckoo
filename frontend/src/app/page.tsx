@@ -64,6 +64,13 @@ type TaskSnapshot = {
   regionsByKey: RegionMap;
 };
 
+type PreviewImage = {
+  src: string;
+  title: string;
+  caption: string;
+  downloadName?: string;
+};
+
 const DEMO_QUEUE: QueueRow[] = [
   { id: "demo-shield", index: 1, name: "实力源头.png", sizeLabel: "312 KB", status: "completed", progress: 100, demoKind: "shield" },
   { id: "demo-welder", index: 2, name: "spot_welder.png", sizeLabel: "198 KB", status: "completed", progress: 100, demoKind: "welder" },
@@ -1316,7 +1323,59 @@ function ResultPreviewPanel({
   onRetry: () => void;
   isRetryDisabled: boolean;
 }) {
+  const translatedResults = useMemo(() => job?.results?.filter((item) => item.file_url) ?? [], [job?.results]);
+  const [selectedResultKey, setSelectedResultKey] = useState("");
+  const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
+  const closePreview = useCallback(() => setPreviewImage(null), []);
   const canDownload = Boolean(downloadHref);
+  const selectedResult =
+    translatedResults.find((item) => resultKey(item) === selectedResultKey) || translatedResults[0] || null;
+  const canDownloadImages = translatedResults.length > 0;
+
+  useEffect(() => {
+    if (!translatedResults.length) {
+      setSelectedResultKey("");
+      return;
+    }
+    if (!translatedResults.some((item) => resultKey(item) === selectedResultKey)) {
+      setSelectedResultKey(resultKey(translatedResults[0]));
+    }
+  }, [selectedResultKey, translatedResults]);
+
+  function openResultPreview(item: JobResult) {
+    setSelectedResultKey(resultKey(item));
+    setPreviewImage({
+      src: apiURL(item.file_url),
+      title: item.output_filename || item.source_filename || "翻译结果",
+      caption: `${item.regions_replaced} 个区域已替换`,
+      downloadName: item.output_filename || safeDownloadName(item.source_filename, "png"),
+    });
+  }
+
+  function openLocalPreview(file: File) {
+    const src = URL.createObjectURL(file);
+    setPreviewImage({
+      src,
+      title: file.name,
+      caption: "原图预览",
+      downloadName: file.name,
+    });
+  }
+
+  function downloadSelectedImage() {
+    if (!selectedResult) {
+      return;
+    }
+    downloadFile(apiURL(selectedResult.file_url), selectedResult.output_filename || safeDownloadName(selectedResult.source_filename, "png"));
+  }
+
+  function downloadAllImages() {
+    translatedResults.forEach((item, index) => {
+      window.setTimeout(() => {
+        downloadFile(apiURL(item.file_url), item.output_filename || safeDownloadName(item.source_filename, "png"));
+      }, index * 180);
+    });
+  }
 
   return (
     <section className="preview-panel">
@@ -1326,9 +1385,18 @@ function ResultPreviewPanel({
       </div>
       <div className="preview-strip" aria-live="polite">
         {job?.results?.length ? (
-          job.results.slice(0, 5).map((item) => <TranslatedPreviewCard item={item} key={`${item.source_filename}-${item.output_filename}`} />)
+          job.results
+            .slice(0, 5)
+            .map((item) => (
+              <TranslatedPreviewCard
+                isSelected={selectedResultKey === resultKey(item)}
+                item={item}
+                key={`${item.source_filename}-${item.output_filename}`}
+                onOpen={openResultPreview}
+              />
+            ))
         ) : files.length ? (
-          files.slice(0, 5).map((file, index) => <LocalPreviewCard file={file} index={index} key={fileKey(file)} />)
+          files.slice(0, 5).map((file, index) => <LocalPreviewCard file={file} index={index} key={fileKey(file)} onOpen={openLocalPreview} />)
         ) : (
           <>
             <DemoPreviewCard kind="params" label="原图" />
@@ -1349,11 +1417,20 @@ function ResultPreviewPanel({
           <DownloadIcon />
           下载全部 ZIP
         </a>
+        <button className="secondary-action image-download-action" type="button" onClick={downloadSelectedImage} disabled={!canDownloadImages}>
+          <ImageIcon />
+          下载当前图片
+        </button>
+        <button className="secondary-action image-download-action" type="button" onClick={downloadAllImages} disabled={!canDownloadImages}>
+          <DownloadIcon />
+          下载全部图片
+        </button>
         <button className="secondary-action retry-action" type="button" onClick={onRetry} disabled={isRetryDisabled}>
           <RefreshIcon />
           只重跑失败项
         </button>
       </div>
+      {previewImage ? <ImagePreviewDialog image={previewImage} onClose={closePreview} /> : null}
     </section>
   );
 }
@@ -1513,24 +1590,32 @@ function LocalImageThumb({ file, className }: { file: File; className: string })
   return <span className={className}>{url ? <img src={url} alt="" /> : null}</span>;
 }
 
-function LocalPreviewCard({ file, index }: { file: File; index: number }) {
+function LocalPreviewCard({ file, index, onOpen }: { file: File; index: number; onOpen: (file: File) => void }) {
   const url = useObjectURL(file);
   return (
-    <article className="preview-card">
+    <button className="preview-card preview-card-button" type="button" onClick={() => onOpen(file)}>
       <div className="preview-image-box">{url ? <img src={url} alt={file.name} /> : null}</div>
       <span>{index % 2 === 0 ? "原图" : "待生成"}</span>
-    </article>
+    </button>
   );
 }
 
-function TranslatedPreviewCard({ item }: { item: JobResult }) {
+function TranslatedPreviewCard({
+  item,
+  isSelected,
+  onOpen,
+}: {
+  item: JobResult;
+  isSelected: boolean;
+  onOpen: (item: JobResult) => void;
+}) {
   return (
-    <article className="preview-card">
+    <button className={`preview-card preview-card-button${isSelected ? " selected" : ""}`} type="button" onClick={() => onOpen(item)}>
       <div className="preview-image-box">
         <img src={apiURL(item.file_url)} alt={item.output_filename || item.source_filename || "翻译结果"} loading="lazy" />
       </div>
       <span>译图</span>
-    </article>
+    </button>
   );
 }
 
@@ -1540,6 +1625,53 @@ function DemoPreviewCard({ kind, label }: { kind: string; label: string }) {
       <div className={`preview-image-box demo-preview ${kind}`} aria-hidden="true" />
       <span>{label}</span>
     </article>
+  );
+}
+
+function ImagePreviewDialog({ image, onClose }: { image: PreviewImage; onClose: () => void }) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (image.src.startsWith("blob:")) {
+        URL.revokeObjectURL(image.src);
+      }
+    };
+  }, [image.src, onClose]);
+
+  function downloadPreviewImage() {
+    downloadFile(image.src, image.downloadName || safeDownloadName(image.title, "png"));
+  }
+
+  return (
+    <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" onMouseDown={onClose}>
+      <div className="image-preview-dialog" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="image-preview-head">
+          <div>
+            <strong>{image.title}</strong>
+            <span>{image.caption}</span>
+          </div>
+          <div className="image-preview-tools">
+            <button className="secondary-action" type="button" onClick={downloadPreviewImage}>
+              <DownloadIcon />
+              下载图片
+            </button>
+            <button className="icon-action" type="button" onClick={onClose} aria-label="关闭预览">
+              <CloseIcon />
+            </button>
+          </div>
+        </div>
+        <div className="image-preview-stage">
+          <img src={image.src} alt={image.title} />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1786,6 +1918,49 @@ function fileKey(file: File) {
   return `${file.name}-${file.size}-${file.lastModified}-${file.type}`;
 }
 
+function resultKey(item: JobResult) {
+  return `${item.source_filename}-${item.output_filename}-${item.file_url}`;
+}
+
+function safeDownloadName(name: string, extension: string) {
+  const fallback = `cuckoo-result.${extension}`;
+  const trimmed = (name || fallback).trim() || fallback;
+  if (/\.[a-z0-9]+$/i.test(trimmed)) {
+    return trimmed.replace(/\.[a-z0-9]+$/i, `.${extension}`);
+  }
+  return `${trimmed}.${extension}`;
+}
+
+async function downloadFile(url: string, filename: string) {
+  if (url.startsWith("blob:")) {
+    triggerDownload(url, filename);
+    return;
+  }
+
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status}`);
+    }
+    const blob = await response.blob();
+    const objectURL = URL.createObjectURL(blob);
+    triggerDownload(objectURL, filename);
+    window.setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+  } catch {
+    triggerDownload(url, filename);
+  }
+}
+
+function triggerDownload(url: string, filename: string) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function GearIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none">
@@ -1829,6 +2004,24 @@ function DownloadIcon() {
     <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none">
       <path d="M12 3v12m0 0 5-5m-5 5-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M5 20h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none">
+      <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="2" />
+      <path d="m7 15 3-3 3 3 2-2 3 3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 9h.01" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none">
+      <path d="m6 6 12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
